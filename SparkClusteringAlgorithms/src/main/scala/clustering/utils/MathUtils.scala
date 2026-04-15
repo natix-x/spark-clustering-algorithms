@@ -1,4 +1,5 @@
-package main.scala.clustering.utils
+package clustering.utils
+
 
 object MathUtils {
 

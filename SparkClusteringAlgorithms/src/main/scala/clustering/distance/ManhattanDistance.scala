@@ -1,4 +1,4 @@
-package main.scala.clustering.distance
+package clustering.distance
 
 import clustering.data.Point
 

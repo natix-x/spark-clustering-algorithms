@@ -1,5 +1,4 @@
-package main.scala.clustering.data
-
+package clustering.data
 
 import org.apache.spark.rdd.RDD
 

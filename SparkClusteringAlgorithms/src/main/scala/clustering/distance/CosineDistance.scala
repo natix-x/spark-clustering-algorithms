@@ -1,7 +1,7 @@
-package main.scala.clustering.distance
-
+package clustering.distance
 
 import clustering.data.Point
+
 
 class CosineDistance extends DistanceMetric {
 

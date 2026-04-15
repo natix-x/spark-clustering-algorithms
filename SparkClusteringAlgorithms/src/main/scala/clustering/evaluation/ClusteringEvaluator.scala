@@ -1,4 +1,4 @@
-package main.scala.clustering.evaluation
+package clustering.evaluation
 
 import clustering.core.Model
 import clustering.data.Point

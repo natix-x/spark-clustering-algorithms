@@ -1,5 +1,9 @@
-package main.scala.clustering.core
+package clustering.core
 
-trait Clusterer[T] {
-    def fit(data: T): Model[T]
+import org.apache.spark.rdd.RDD
+import clustering.data.Point
+
+
+trait Clusterer {
+  def fit(data: RDD[Point]): Model
 }

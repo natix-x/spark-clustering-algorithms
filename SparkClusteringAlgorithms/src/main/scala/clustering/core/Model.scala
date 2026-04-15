@@ -1,7 +1,8 @@
-package main.scala.clustering.core
+package clustering.core
 
-import main.scala.clustering.data.Point
+import clustering.data.Point
 
-trait Model[T] {
+
+trait Model extends Serializable {
     def predict(point: Point): Int
 }
