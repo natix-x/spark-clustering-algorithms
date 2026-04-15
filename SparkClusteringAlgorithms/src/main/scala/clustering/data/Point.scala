@@ -1,5 +1,5 @@
 package main.scala.clustering.data
 
-class Point {
-
+case class Point(values: Vector[Double]) extends Serializable {
+  def dimension: Int = values.size
 }

@@ -1,5 +1,7 @@
 package main.scala.clustering.core
 
-trait Model {
+import main.scala.clustering.data.Point
 
+trait Model[T] {
+    def predict(point: Point): Int
 }

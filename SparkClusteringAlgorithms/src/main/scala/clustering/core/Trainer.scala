@@ -1,5 +1,5 @@
 package main.scala.clustering.core
 
-trait Trainer {
-
+trait Trainer[D, M <: Model] extends Serializable {
+    def train(data: D): M
 }

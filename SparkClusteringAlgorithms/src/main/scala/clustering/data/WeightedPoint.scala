@@ -1,5 +1,4 @@
 package main.scala.clustering.data
 
-class WeightedPoint {
 
-}
+case class WeightedPoint(point: Point, weight: Double) extends Serializable

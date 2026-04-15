@@ -1,5 +1,5 @@
 package main.scala.clustering.distance
 
-class DistanceMetric {
-
+trait DistanceMetric extends Serializable {
+    def compute(a: Point, b: Point): Double
 }

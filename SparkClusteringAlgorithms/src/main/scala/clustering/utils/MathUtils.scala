@@ -1,5 +1,8 @@
 package main.scala.clustering.utils
 
-class MathUtils {
+object MathUtils {
 
+  def argmin[T](seq: Seq[T])(f: T => Double): Int = {
+    seq.zipWithIndex.minBy { case (v, _) => f(v) }._2
+  }
 }
