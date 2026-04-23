@@ -5,6 +5,6 @@ import clustering.data.Point
 import org.apache.spark.rdd.RDD
 
 
-trait ClusteringEvaluator {
+trait ClusteringEvaluator extends Serializable {
   def evaluate(model: Model, data: RDD[Point]): Double
 }
