@@ -3,46 +3,37 @@ package clustering.algorithms.dbscan
 import clustering.core.Clusterer
 import clustering.data.{DatasetOps, Point}
 import clustering.distance.{DistanceMetric, EuclideanDistance}
-import clustering.utils.{SparkUtils, UnionFind}
+import clustering.utils.UnionFind
 import org.apache.spark.rdd.RDD
 
-
-/** Distributed DBSCAN using a full cartesian neighbourhood join.
- *
- *  Complexity: O(n²) due to cartesian product — intentionally naive to
- *  serve as a scalability baseline against GridDBSCAN.
- *
- *  Algorithm:
- *  1. Cartesian join → all (p, q) pairs within eps.
- *  2. Count neighbours per point → identify core points.
- *  3. Build edge set among core points → union-find on driver.
- *  4. Assign border points to nearest core cluster; mark rest as noise.
- */
 class DBSCAN(
-  val eps: Double,
-  val minPts: Int,
-  val distance: DistanceMetric = new EuclideanDistance()
-) extends Clusterer {
+              val eps: Double,
+              val minPts: Int,
+              val distance: DistanceMetric = EuclideanDistance
+            ) extends Clusterer {
 
   override def fit(data: RDD[Point]): DBSCANModel = {
     val cached = DatasetOps.cachePoints(data)
     implicit val sc = cached.sparkContext
 
+    // 1. Kartezjańskie szukanie sąsiadów (O(N^2))
     val withinEps: RDD[(Point, Point)] = cached
       .cartesian(cached)
       .filter { case (p, q) => distance.compute(p, q) <= eps }
       .cache()
 
-    val corePoints: Set[Point] = withinEps
-      .map { case (p, _) => (p, 1) }
+    // 2. Szukanie punktów rdzeniowych (Core Points)
+    val corePointsArray: Array[Point] = withinEps
+      .map { case (p, _) => (p, 1L) }
       .reduceByKey(_ + _)
       .filter { case (_, cnt) => cnt >= minPts }
       .keys
       .collect()
-      .toSet
 
-    val bcCorePoints = SparkUtils.broadcastSafe(corePoints)
+    val corePointsSet = corePointsArray.toSet
+    val bcCorePoints = sc.broadcast(corePointsSet)
 
+    // 3. Budowanie krawędzi i spójnych składowych
     val edges: Array[(Point, Point)] = withinEps
       .filter { case (p, q) =>
         val cp = bcCorePoints.value
@@ -50,19 +41,40 @@ class DBSCAN(
       }
       .collect()
 
-    withinEps.unpersist()
-    bcCorePoints.destroy()
+    withinEps.unpersist(blocking = false)
+    bcCorePoints.unpersist(blocking = false)
 
-    val coreLabels: Map[Point, Int] = UnionFind.labelComponents(corePoints.toArray, edges)
+    val coreLabels: Map[Point, Int] = UnionFind.labelComponents(corePointsArray, edges)
+    val bcCoreLabels = sc.broadcast(coreLabels)
 
-    val allLabels: Map[Point, Int] = cached.collect().map { p =>
-      if (corePoints.contains(p)) p -> coreLabels(p)
-      else {
-        val nearest = corePoints.find(cp => distance.compute(cp, p) <= eps)
-        p -> nearest.map(coreLabels).getOrElse(-1)
+    // 4. Przypisanie szumu i punktów brzegowych (W PEŁNI ROZPROSZONE)
+    val labeledRDD: RDD[(Point, Int)] = cached.mapPartitions { iter =>
+      val localCoreLabelsMap = bcCoreLabels.value
+      val localCorePointsArr = localCoreLabelsMap.keys.toArray
+
+      iter.map { p =>
+        if (localCoreLabelsMap.contains(p)) {
+          (p, localCoreLabelsMap(p))
+        } else {
+          var i = 0
+          var assignedLabel = -1 // -1 = NOISE
+          var found = false
+          val len = localCorePointsArr.length
+
+          while (i < len && !found) {
+            val cp = localCorePointsArr(i)
+            if (distance.compute(cp, p) <= eps) {
+              assignedLabel = localCoreLabelsMap(cp)
+              found = true
+            }
+            i += 1
+          }
+          (p, assignedLabel)
+        }
       }
-    }.toMap
+    }
 
-    new DBSCANModel(allLabels, corePoints, eps, distance)
+    // 🔹 KLUCZOWA ZMIANA: Zwracamy RDD, NIE ROBIMY collectAsMap()!
+    new DBSCANModel(labeledRDD, corePointsSet, eps, distance)
   }
 }

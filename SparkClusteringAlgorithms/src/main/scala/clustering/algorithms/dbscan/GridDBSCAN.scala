@@ -9,34 +9,23 @@ import org.apache.spark.rdd.RDD
 
 /** Grid-accelerated DBSCAN.
  *
- *  Partitions the feature space into a regular grid with cell side
- *  `eps / sqrt(d)`.  For each point only the 3^d adjacent cells need
- *  to be checked, reducing the neighbourhood join from O(n²) to
- *  O(n * 3^d).  Particularly effective for low-dimensional data.
- *
- *  Algorithm:
- *  1. Assign every point to its grid cell.
- *  2. Expand each point to all neighbouring cells (flatMap).
- *  3. Join with the cell→point index → candidate pairs.
- *  4. Filter candidates by true eps-distance → neighbour pairs.
- *  5. Count neighbours → core points → union-find on driver.
- *  6. Assign border/noise labels.
+ *  Cell side = eps → checking ±1 neighbours in each dimension is sufficient
+ *  to find all eps-neighbours (cells differing by 2+ are always > eps apart).
+ *  Reduces neighbourhood join from O(n²) to O(n * 3^d).
  */
 class GridDBSCAN(
   val eps: Double,
   val minPts: Int,
-  val distance: DistanceMetric = new EuclideanDistance()
+  val distance: DistanceMetric = EuclideanDistance
 ) extends Clusterer {
 
   override def fit(data: RDD[Point]): DBSCANModel = {
     val cached = DatasetOps.cachePoints(data)
     implicit val sc = cached.sparkContext
 
-    val cellSize = eps
-
     val cellPoints: RDD[(Vector[Int], Point)] = cached
       .map { p =>
-        val cell = p.values.map(v => math.floor(v / cellSize).toInt).toVector
+        val cell = p.values.map(v => math.floor(v / eps).toInt).toVector
         (cell, p)
       }
       .cache()
@@ -48,15 +37,15 @@ class GridDBSCAN(
       .filter { case (p, q) => distance.compute(p, q) <= eps }
       .cache()
 
-    val corePoints: Set[Point] = neighborPairs
+    val corePointsArray: Array[Point] = neighborPairs
       .map { case (p, _) => (p, 1) }
       .reduceByKey(_ + _)
       .filter { case (_, cnt) => cnt >= minPts }
       .keys
       .collect()
-      .toSet
 
-    val bcCorePoints = SparkUtils.broadcastSafe(corePoints)
+    val corePointsSet = corePointsArray.toSet
+    val bcCorePoints  = SparkUtils.broadcastSafe(corePointsSet)
 
     val edges: Array[(Point, Point)] = neighborPairs
       .filter { case (p, q) =>
@@ -65,21 +54,32 @@ class GridDBSCAN(
       }
       .collect()
 
-    neighborPairs.unpersist()
-    cellPoints.unpersist()
-    bcCorePoints.destroy()
+    neighborPairs.unpersist(blocking = false)
+    cellPoints.unpersist(blocking = false)
+    bcCorePoints.unpersist(blocking = false)
 
-    val coreLabels: Map[Point, Int] = UnionFind.labelComponents(corePoints.toArray, edges)
+    val coreLabels   = UnionFind.labelComponents(corePointsArray, edges)
+    val bcCoreLabels = SparkUtils.broadcastSafe(coreLabels)
 
-    val allLabels: Map[Point, Int] = cached.collect().map { p =>
-      if (corePoints.contains(p)) p -> coreLabels(p)
-      else {
-        val nearest = corePoints.find(cp => distance.compute(cp, p) <= eps)
-        p -> nearest.map(coreLabels).getOrElse(-1)
+    val labelsRDD: RDD[(Point, Int)] = cached.mapPartitions { iter =>
+      val localLabels = bcCoreLabels.value
+      val localCores  = localLabels.keys.toArray
+      iter.map { p =>
+        if (localLabels.contains(p)) (p, localLabels(p))
+        else {
+          var i = 0; var label = -1; var found = false
+          while (i < localCores.length && !found) {
+            if (distance.compute(localCores(i), p) <= eps) {
+              label = localLabels(localCores(i)); found = true
+            }
+            i += 1
+          }
+          (p, label)
+        }
       }
-    }.toMap
+    }
 
-    new DBSCANModel(allLabels, corePoints, eps, distance)
+    new DBSCANModel(labelsRDD, corePointsSet, eps, distance)
   }
 
   private def neighborCells(cell: Vector[Int]): Seq[Vector[Int]] = {
@@ -87,8 +87,8 @@ class GridDBSCAN(
 
     def expand(dims: List[Int], current: Vector[Int]): Seq[Vector[Int]] =
       dims match {
-        case Nil         => Seq(current)
-        case d :: rest   => offsets.flatMap(o => expand(rest, current :+ (cell(d) + o)))
+        case Nil       => Seq(current)
+        case d :: rest => offsets.flatMap(o => expand(rest, current :+ (cell(d) + o)))
       }
 
     expand(cell.indices.toList, Vector.empty)
