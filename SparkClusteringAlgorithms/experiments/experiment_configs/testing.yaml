@@ -1,0 +1,33 @@
+name: cluster-standalone-matrix
+
+configs_dir: "$SCRATCH/clustering-runs/configs"
+output_dir: "$SCRATCH/clustering-runs/results"
+log_dir: "$SCRATCH/clustering-runs/logs"
+jar_path: "/net/pr2/projects/plgrid/plggclustering25/spark-clustering-benchmark.jar"
+
+# Non-resource SLURM/module defaults shared by every run.
+# Per-experiment CPU/memory/executor allocation lives in matrix.resources below.
+sbatch_defaults:
+  account: "plgclusteringbigdata-cpu"
+  partition: "plgrid"
+  walltime: "00:10:00"  # small time for testing
+  spark_module: "spark/3.3.2-hadoop-3.2-java-11"
+
+evaluation_defaults:
+  metrics: ["silhouette", "clusterSizes", "noiseFraction"]
+  sampleSize: 10000  # TODO: can we optimize this? (not urgent)
+  seed: 42
+
+spark_conf_defaults:
+  spark.serializer: "org.apache.spark.serializer.KryoSerializer"
+
+matrix:
+  nodes: [1]
+  resources:
+    - {cpus_per_task: 8, executors_per_node: 1, mem: "48G"}
+  algorithm:
+    - {name: kmeans, params: {k: 5, maxIter: 100, distance: euclidean}}
+  dataset:
+    - {type: synthetic, params: {numPoints: 100, numPartitions: 32}}
+
+repetitions: 1
