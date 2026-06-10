@@ -1,0 +1,29 @@
+{
+  "runId": "example-kmeans-synth-100k",
+  "profile": "local",
+  "dataset": {
+    "type": "synthetic",
+    "params": {
+      "numPoints": 1000000,
+      "numPartitions": 8,
+      "seed": 42
+    }
+  },
+  "algorithm": {
+    "name": "kmeans",
+    "params": {
+      "k": 5,
+      "maxIter": 50,
+      "distance": "euclidean",
+      "seed": 42
+    }
+  },
+  "evaluation": {
+    "metrics": ["silhouette", "clusterSizes", "noiseFraction"],
+    "sampleSize": 5000,
+    "seed": 42
+  },
+  "sparkConf": {
+    "spark.serializer": "org.apache.spark.serializer.KryoSerializer"
+  }
+}
