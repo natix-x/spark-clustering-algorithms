@@ -1,8 +1,8 @@
 package clustering.distance
 
-import clustering.data.Point
+import org.apache.spark.ml.linalg.Vector
 
 
 trait DistanceMetric extends Serializable {
-    def compute(a: Point, b: Point): Double
+  def compute(a: Vector, b: Vector): Double
 }

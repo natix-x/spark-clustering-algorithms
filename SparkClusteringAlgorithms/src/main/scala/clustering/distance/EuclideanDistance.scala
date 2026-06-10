@@ -1,15 +1,17 @@
 package clustering.distance
 
-import clustering.data.Point
+import org.apache.spark.ml.linalg.Vector
 
 
-class EuclideanDistance extends DistanceMetric {
+object EuclideanDistance extends DistanceMetric {
 
-  override def compute(a: Point, b: Point): Double = {
-    var i = 0
+  override def compute(a: Vector, b: Vector): Double = {
+    val x = a.toArray
+    val y = b.toArray
+    var i   = 0
     var sum = 0.0
-    while (i < a.values.size) {
-      val d = a.values(i) - b.values(i)
+    while (i < x.length) {
+      val d = x(i) - y(i)
       sum += d * d
       i += 1
     }

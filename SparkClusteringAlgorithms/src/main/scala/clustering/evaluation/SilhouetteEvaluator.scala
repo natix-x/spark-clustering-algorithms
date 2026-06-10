@@ -1,10 +1,10 @@
 package clustering.evaluation
 
 import clustering.core.Model
-import clustering.data.Point
 import clustering.distance.{DistanceMetric, EuclideanDistance}
-import clustering.utils.SparkUtils
-import org.apache.spark.rdd.RDD
+import org.apache.spark.ml.linalg.Vector
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.functions._
 
 
 /** Computes the mean silhouette score over all non-noise points.
@@ -13,52 +13,82 @@ import org.apache.spark.rdd.RDD
  *  where a = mean intra-cluster distance, b = mean nearest-cluster distance.
  *  Score in [-1, 1]; higher is better.
  *
- *  Noise points (label -1, as produced by DBSCAN) are excluded.
+ *  Noise points (label -1, as produced by DBSCAN) are excluded. The score is
+ *  O(n²); the caller is expected to sample the data down beforehand.
  */
 class SilhouetteEvaluator(
-                           val distance: DistanceMetric = new EuclideanDistance()
+                           val distance: DistanceMetric = EuclideanDistance
                          ) extends ClusteringEvaluator {
 
-  override def evaluate(model: Model, data: RDD[Point]): Double = {
-    implicit val sc = data.sparkContext
+  override def evaluate(model: Model, data: DataFrame): Double = {
+    val spark = data.sparkSession
 
-    val labeled: RDD[(Point, Int)] = data.map(p => (p, model.predict(p)))
+    val labeled = model.labeledData(data)
+      .filter(col("prediction") =!= -1)
+      .select(col("prediction"), col("features"))
+      .cache()
 
-    val clusterMap: Map[Int, Array[Point]] = labeled
-      .filter { case (_, l) => l != -1 }
-      .map    { case (p, l) => (l, p)  }
-      .groupByKey()
-      .collectAsMap()
-      .map { case (l, pts) => l -> pts.toArray }
-      .toMap
+    // Build cluster -> points map on the driver. Silhouette is O(n²), so the
+    // caller samples the data to a tractable size before evaluation.
+    val clusterMap: Map[Int, Array[Vector]] = labeled.collect()
+      .map(r => (r.getInt(0), r.getAs[Vector]("features")))
+      .groupBy(_._1)
+      .map { case (l, arr) => l -> arr.map(_._2) }
 
-    val bcClusters = SparkUtils.broadcastSafe(clusterMap)
+    if (clusterMap.isEmpty) {
+      labeled.unpersist()
+      return 0.0
+    }
 
-    val (scoreSum, count) = labeled
-      .filter { case (_, l) => l != -1 }
-      .map { case (p, label) =>
-        val clus        = bcClusters.value
-        val sameCluster = clus.getOrElse(label, Array.empty).filter(_ != p)
-        val a           = meanDist(p, sameCluster)
-        val b           = clus
-          .filter { case (k, _) => k != label }
-          .values
-          .map(pts => meanDist(p, pts))
-          .reduceOption(_ min _)
-          .getOrElse(Double.MaxValue)
-        val denom = math.max(a, b)
-        if (denom == 0.0) 0.0 else (b - a) / denom
-      }
-      .aggregate((0.0, 0L))(
-        { case ((s, c), v) => (s + v, c + 1L) },
-        { case ((s1, c1), (s2, c2)) => (s1 + s2, c1 + c2) }
-      )
+    val bcClusters = spark.sparkContext.broadcast(clusterMap)
+    val dist       = distance
+
+    val silUDF = udf { (label: Int, p: Vector) =>
+      val clus = bcClusters.value
+      val a    = SilhouetteEvaluator.meanDistExclSelf(p, clus.getOrElse(label, Array.empty[Vector]), dist)
+      val b    = clus.iterator
+        .filter(_._1 != label)
+        .map { case (_, pts) => SilhouetteEvaluator.meanDist(p, pts, dist) }
+        .reduceOption(_ min _)
+        .getOrElse(Double.MaxValue)
+      val denom = math.max(a, b)
+      if (denom == 0.0) 0.0 else (b - a) / denom
+    }
+
+    val row = labeled
+      .select(silUDF(col("prediction"), col("features")).as("s"))
+      .agg(sum("s").as("scoreSum"), count("s").as("cnt"))
+      .head()
+
+    val scoreSum = if (row.isNullAt(0)) 0.0 else row.getDouble(0)
+    val cnt      = row.getLong(1)
 
     bcClusters.destroy()
-    if (count == 0L) 0.0 else scoreSum / count
+    labeled.unpersist()
+    if (cnt == 0L) 0.0 else scoreSum / cnt
+  }
+}
+
+object SilhouetteEvaluator {
+
+  private def meanDist(p: Vector, pts: Array[Vector], dist: DistanceMetric): Double = {
+    if (pts.isEmpty) return 0.0
+    var s = 0.0
+    var i = 0
+    while (i < pts.length) { s += dist.compute(p, pts(i)); i += 1 }
+    s / pts.length
   }
 
-  private def meanDist(p: Point, pts: Array[Point]): Double =
-    if (pts.isEmpty) 0.0
-    else pts.map(q => distance.compute(p, q)).sum / pts.length
+  /** Mean distance to other points in the same cluster, excluding `p` itself. */
+  private def meanDistExclSelf(p: Vector, pts: Array[Vector], dist: DistanceMetric): Double = {
+    var s   = 0.0
+    var cnt = 0
+    var i   = 0
+    while (i < pts.length) {
+      val q = pts(i)
+      if (!q.equals(p)) { s += dist.compute(p, q); cnt += 1 }
+      i += 1
+    }
+    if (cnt == 0) 0.0 else s / cnt
+  }
 }

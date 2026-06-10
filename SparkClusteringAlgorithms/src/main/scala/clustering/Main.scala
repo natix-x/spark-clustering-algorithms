@@ -1,70 +1,67 @@
 package clustering
 
-import clustering.core.Model
-import clustering.data.Point
+import clustering.algorithms.dbscan.GridDBSCAN
+import clustering.benchmark.datasource.SyntheticDataSource
 import clustering.distance.EuclideanDistance
-import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.functions._
 
-
+/** Quick local smoke test of the DataFrame-based pipeline.
+ *  The real benchmark entry point is `clustering.benchmark.BenchmarkRunner`.
+ */
 object Main {
 
   def main(args: Array[String]): Unit = {
 
-    // 1. Spark session
     val spark = SparkSession.builder()
-      .appName("ClusteringTest")
+      .appName("DBSCAN-Thesis-Pipeline")
       .master("local[*]")
       .getOrCreate()
 
     val sc = spark.sparkContext
+    sc.setLogLevel("WARN")
+    // GraphFrames connected-components checkpoints its iterations.
+    sc.setCheckpointDir(s"${System.getProperty("java.io.tmpdir")}/spark-checkpoints-main")
 
-    // 2. Dummy dataset
-    val data: RDD[Point] = sc.parallelize(Seq(
-      Point(Vector(1.0, 2.0, -2.0)),
-      Point(Vector(2.0, 1.0, 70.0)),
-      Point(Vector(8.0, 9.0, 80.0)),
-      Point(Vector(9.0, 8.0, 10.0))
-    ))
+    println("=== ROZPOCZYNAM TEST GridDBSCAN (DENSITY-BASED CLUSTERING) ===")
 
-    // 3. Dummy model (żeby sprawdzić pipeline)
-    val model = new Model {
-      override def predict(point: Point): Int = {
-        if (point.values.sum > 10) 1 else 0
-      }
+    val numPoints = 200000
+    println(s"\n[1/3] Generowanie $numPoints punktów (HARD MODE - ZŁOŻONE DANE)...")
+
+    val data = new SyntheticDataSource(numPoints = numPoints, numPartitions = 13, seed = 42L)
+      .load(spark)
+      .cache()
+    data.count() // wymuszenie akcji
+
+    println("\n[2/3] Trenowanie GridDBSCAN...")
+    val eps    = 10.0
+    val minPts = 50
+    val trainer = new GridDBSCAN(eps = eps, minPts = minPts, distance = EuclideanDistance)
+
+    val t0    = System.nanoTime()
+    val model = trainer.fit(data)
+    val t1    = System.nanoTime()
+    println(f"-> GridDBSCAN zakończony w czasie: ${(t1 - t0) / 1e9d}%.3f s")
+
+    println("\n[3/3] Podsumowanie rozkładu klastrów...")
+    val distribution = model.labeledData(data)
+      .groupBy(col("prediction"))
+      .count()
+      .orderBy(col("prediction"))
+      .collect()
+
+    println("\nRozkład klastrów GridDBSCAN:")
+    distribution.foreach { r =>
+      val clusterId = r.getInt(0)
+      val count     = r.getLong(1)
+      if (clusterId == -1) println(s"  NOISE (szum): $count punktów")
+      else println(s"  Klaster $clusterId: $count punktów")
     }
 
-    // 4. Test model prediction
-    println("=== MODEL TEST ===")
-    data.collect().foreach { p =>
-      println(s"${p.values} -> cluster ${model.predict(p)}")
-    }
+    val numClusters = distribution.count(_.getInt(0) >= 0)
+    println(s"\nZnaleziono $numClusters klastrów (+ szum)")
 
-    // 5. Test distance metric
-    println("\n=== DISTANCE TEST ===")
-    val dist = new EuclideanDistance()
-
-    val p1 = Point(Vector(1.0, 2.0))
-    val p2 = Point(Vector(4.0, 6.0))
-
-    println(s"Distance: ${dist.compute(p1, p2)}")
-
-    // 6. Fake convergence test
-    println("\n=== CONVERGENCE TEST ===")
-
-    val oldC = Array(Point(Vector(1.0, 1.0)), Point(Vector(10.0, 10.0)))
-    val newC = Array(Point(Vector(1.1, 1.1)), Point(Vector(9.9, 9.9)))
-
-    val eps = 0.5
-
-    val converged = oldC.zip(newC).forall {
-      case (a, b) =>
-        dist.compute(a, b) < eps
-    }
-
-    println(s"Converged: $converged")
-
-    // 7. Stop Spark
     spark.stop()
+    println("\n=== TEST ZAKOŃCZONY SUKCESEM ===")
   }
 }

@@ -1,14 +1,16 @@
 package clustering.distance
 
-import clustering.data.Point
+import org.apache.spark.ml.linalg.Vector
 
 
-class CosineDistance extends DistanceMetric {
+object CosineDistance extends DistanceMetric {
 
-  override def compute(a: Point, b: Point): Double = {
-    val dot = dotProduct(a.values, b.values)
-    val normA = magnitude(a.values)
-    val normB = magnitude(b.values)
+  override def compute(a: Vector, b: Vector): Double = {
+    val x     = a.toArray
+    val y     = b.toArray
+    val dot   = dotProduct(x, y)
+    val normA = magnitude(x)
+    val normB = magnitude(y)
 
     if (normA == 0.0 || normB == 0.0) {
       1.0 // maksymalna odległość (brak kierunku)
@@ -17,20 +19,20 @@ class CosineDistance extends DistanceMetric {
     }
   }
 
-  private def dotProduct(x: Vector[Double], y: Vector[Double]): Double = {
-    var i = 0
+  private def dotProduct(x: Array[Double], y: Array[Double]): Double = {
+    var i   = 0
     var sum = 0.0
-    while (i < x.size) {
+    while (i < x.length) {
       sum += x(i) * y(i)
       i += 1
     }
     sum
   }
 
-  private def magnitude(x: Vector[Double]): Double = {
-    var i = 0
+  private def magnitude(x: Array[Double]): Double = {
+    var i   = 0
     var sum = 0.0
-    while (i < x.size) {
+    while (i < x.length) {
       sum += x(i) * x(i)
       i += 1
     }

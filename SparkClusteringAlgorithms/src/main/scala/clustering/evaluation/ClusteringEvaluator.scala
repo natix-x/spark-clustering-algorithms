@@ -1,10 +1,9 @@
 package clustering.evaluation
 
 import clustering.core.Model
-import clustering.data.Point
-import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.DataFrame
 
 
 trait ClusteringEvaluator extends Serializable {
-  def evaluate(model: Model, data: RDD[Point]): Double
+  def evaluate(model: Model, data: DataFrame): Double
 }
