@@ -1,84 +1,87 @@
 package clustering.algorithms.kmeans
 
 import clustering.core.Clusterer
-import clustering.data.{DatasetOps, Point}
 import clustering.distance.{DistanceMetric, EuclideanDistance}
 import clustering.utils.Convergence
-import org.apache.spark.rdd.RDD
+import org.apache.spark.ml.linalg.Vector
+import org.apache.spark.ml.stat.Summarizer
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.expressions.UserDefinedFunction
 
 class KMeans(
-              val k: Int,
-              val maxIter: Int = 100,
-              val eps: Double = 1e-4,
-              val distance: DistanceMetric = EuclideanDistance
-            ) extends Clusterer {
+  val k:        Int,
+  val maxIter:  Int            = 100,
+  val eps:      Double         = 1e-4,
+  val distance: DistanceMetric = EuclideanDistance,
+  val seed:     Long           = 42L
+) extends Clusterer {
 
-  override def fit(data: RDD[Point]): KMeansModel = {
-    // Zakładam, że cachePoints robi data.cache() pod spodem
-    val cached = DatasetOps.cachePoints(data)
-    implicit val sc = cached.sparkContext
+  override def fit(data: DataFrame): KMeansModel = {
+    val spark = data.sparkSession
 
-    var centroids = cached.takeSample(withReplacement = false, num = k, seed = 42L)
-    var iter      = 0
-    var converged = false
+    val points = data.select(col("features")).cache()
+    val n      = points.count()
 
-    while (!converged && iter < maxIter) {
-      val bcCentroids = sc.broadcast(centroids)
+    // Phase 1: Initialize centroids — random sample
+    // TODO: replace with KMeans++ for better convergence
+    var centroids: Array[Vector] = points
+      .sample(withReplacement = false,
+              fraction        = math.min(1.0, (k * 3).toDouble / n),
+              seed            = seed)
+      .take(k)
+      .map(_.getAs[Vector]("features"))
 
-      // 1. MAP + LOKALNA OPTYMALIZACJA IMPERATYWNA
-      val mappedToCentroids = cached.mapPartitions { iterator =>
-        val localCentroids = bcCentroids.value
+    require(centroids.length == k,
+      s"Could not sample $k initial centroids — dataset too small (n=$n).")
 
-        iterator.map { p =>
-          var bestIdx = 0
-          var minD = Double.MaxValue
-          var j = 0
+    var iteration    = 0
+    var hasConverged = false
 
-          // Eliminacja MathUtils.argmin na rzecz bezalokacyjnej pętli
-          while (j < localCentroids.length) {
-            val d = distance.compute(p, localCentroids(j))
-            if (d < minD) {
-              minD = d
-              bestIdx = j
-            }
-            j += 1
-          }
+    while (!hasConverged && iteration < maxIter) {
 
-          // Emitujemy parę: (Klucz=ID klastra, Wartość=(Punkt, Licznik=1L))
-          (bestIdx, (p, 1L))
+      // Phase 2: Broadcast centroids to all executors
+      val bc = spark.sparkContext.broadcast(centroids)
+
+      // Phase 3: Assign each point to the nearest centroid via UDF.
+      // UDF is closed over the broadcast — Catalyst pipelines it with
+      // the downstream groupBy without an extra shuffle.
+      val assignUDF: UserDefinedFunction = udf { features: Vector =>
+        val localCentroids = bc.value
+        var bestIdx = 0
+        var minDist = Double.MaxValue
+        var i       = 0
+        while (i < localCentroids.length) {
+          val d = distance.compute(features, localCentroids(i))
+          if (d < minDist) { minDist = d; bestIdx = i }
+          i += 1
         }
+        bestIdx
       }
 
-      // 2. REDUCE BY KEY (Rozwiązanie problemu Shuffle / OOM)
-      // Zamiast groupByKey, agregujemy sumy lokalnie na węzłach.
-      // Wymaga to, aby Twoja klasa Point umiała dodać do siebie dwa punkty (p1 + p2)
-      val newCentroidSums = mappedToCentroids.reduceByKey { case ((p1, count1), (p2, count2)) =>
-        // Założenie: Point ma metodę dodawania (lub należy to zrobić ręcznie na tablicach)
-        (p1 + p2, count1 + count2)
-      }.collectAsMap()
+      // Phase 4: Aggregate per cluster with Summarizer.mean.
+      // Summarizer is backed by an optimised Spark aggregate —
+      // no manual (sumVector / count) arithmetic needed.
+      val statsMap: Map[Int, Vector] = points
+        .withColumn("clusterId", assignUDF(col("features")))
+        .groupBy("clusterId")
+        .agg(Summarizer.mean(col("features")).as("newCentroid"))
+        .collect()
+        .map(r => r.getInt(0) -> r.getAs[Vector]("newCentroid"))
+        .toMap
 
-      // 3. AKTUALIZACJA CENTROIDÓW
-      // Zwalnianie asynchroniczne zamiast agresywnego .destroy()
-      bcCentroids.unpersist(blocking = false)
+      bc.unpersist()
 
-      val newCentroids = (0 until k).map { i =>
-        newCentroidSums.get(i) match {
-          case Some((sumPoint, count)) =>
-            // Dzielimy sumę wektorów przez liczbę punktów.
-            // Założenie: Point ma operator dzielenia przez skalar (sumPoint / count)
-            sumPoint / count
-          case None =>
-            // Jeśli klaster "umarł" (0 punktów), zostawiamy stary centroid
-            centroids(i)
-        }
-      }.toArray
+      // Phase 5: Update centroids; keep the old one for empty clusters
+      val nextCentroids = (0 until k).map(i => statsMap.getOrElse(i, centroids(i))).toArray
 
-      // 4. SPRAWDZENIE ZBIEŻNOŚCI
-      converged  = Convergence.hasConverged(centroids, newCentroids, eps, distance)
-      centroids  = newCentroids
-      iter      += 1
+      // Phase 6: Check convergence
+      hasConverged = Convergence.hasConverged(centroids, nextCentroids, eps, distance)
+      centroids    = nextCentroids
+      iteration   += 1
     }
 
+    points.unpersist(blocking = false)
     new KMeansModel(centroids, distance)
   }
 }

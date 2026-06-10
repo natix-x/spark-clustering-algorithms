@@ -1,44 +1,44 @@
 package clustering.algorithms.kmedoids
 
 import clustering.core.Model
-import clustering.data.Point
 import clustering.distance.DistanceMetric
-import org.apache.spark.rdd.RDD
+import org.apache.spark.ml.linalg.Vector
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.functions.{col, udf}
 
 
 class KMedoidsModel(
-  val medoids: Array[Point],
+  val medoids: Array[Vector],
   val distance: DistanceMetric
 ) extends Model {
 
-  def predict(point: Point): Int = {
+  def predict(features: Vector): Int = {
     var bestIdx = 0
     var minD    = Double.MaxValue
     var j       = 0
     while (j < medoids.length) {
-      val d = distance.compute(point, medoids(j))
+      val d = distance.compute(features, medoids(j))
       if (d < minD) { minD = d; bestIdx = j }
       j += 1
     }
     bestIdx
   }
 
-  override def labeledData(data: RDD[Point]): RDD[(Point, Int)] = {
-    val bc   = data.sparkContext.broadcast(medoids)
+  override def labeledData(data: DataFrame): DataFrame = {
+    val bc   = data.sparkSession.sparkContext.broadcast(medoids)
     val dist = distance
-    data.mapPartitions { iter =>
+    val predictUDF = udf { features: Vector =>
       val localMedoids = bc.value
-      iter.map { p =>
-        var bestIdx = 0
-        var minD    = Double.MaxValue
-        var j       = 0
-        while (j < localMedoids.length) {
-          val d = dist.compute(p, localMedoids(j))
-          if (d < minD) { minD = d; bestIdx = j }
-          j += 1
-        }
-        (p, bestIdx)
+      var bestIdx = 0
+      var minD    = Double.MaxValue
+      var j       = 0
+      while (j < localMedoids.length) {
+        val d = dist.compute(features, localMedoids(j))
+        if (d < minD) { minD = d; bestIdx = j }
+        j += 1
       }
+      bestIdx
     }
+    data.withColumn("prediction", predictUDF(col("features")))
   }
 }

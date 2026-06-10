@@ -1,52 +1,49 @@
 package clustering.algorithms.kmedoids
 
 import clustering.core.Clusterer
-import clustering.data.{DatasetOps, Point}
 import clustering.distance.{DistanceMetric, EuclideanDistance}
-import org.apache.spark.rdd.RDD
+import org.apache.spark.ml.linalg.Vector
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.expressions.UserDefinedFunction
 
-/** Clustering Large Applications (CLARA).
- *
- * Runs PAM on `numSamples` random subsets of the data (each of fixed size
- * `sampleSize`), then scores every candidate model on the
- * full dataset and returns the best one.
- *
- * Scales to extremely large datasets where full PAM would be prohibitive.
- */
+
 class CLARA(
-             val k: Int,
-             val numSamples: Int = 5,
-             val sampleSize: Int = 1000, // 🔹 ZMIANA: Stały rozmiar zamiast ułamka!
-             val maxIter: Int = 100,
-             val distance: DistanceMetric = EuclideanDistance
-           ) extends Clusterer {
+  val k:          Int,
+  val numSamples: Int          = 5,
+  val sampleSize: Int          = 1000,
+  val maxIter:    Int          = 100,
+  val distance:   DistanceMetric = EuclideanDistance
+) extends Clusterer {
 
-  // Zwróć uwagę, że PAM będzie teraz działał na bardzo małych zbiorach (np. 1000 punktów).
-  // Dzięki temu możemy go uruchamiać bardzo szybko w pętli.
   private val pam = new PAM(k, maxIter, distance)
 
-  override def fit(data: RDD[Point]): KMedoidsModel = {
-    val cached = DatasetOps.cachePoints(data)
-    val sc = cached.sparkContext
+  override def fit(data: DataFrame): KMedoidsModel = {
+    val spark  = data.sparkSession
+    val cached = data.select(col("features")).cache()
 
     var bestModel: KMedoidsModel = null
-    var minCost = Double.MaxValue
+    var minCost                  = Double.MaxValue
 
-    // Iterujemy sekwencyjnie po próbkach
     for (i <- 0 until numSamples) {
 
-      // 1. Zbieramy małą, stałą próbkę prosto na Drivera (tzw. "Driver-side PAM")
-      // takeSample to akcja, więc dane od razu lądują w pamięci operacyjnej Mastera
-      val sampleArray = cached.takeSample(withReplacement = false, num = sampleSize, seed = i.toLong)
+      // Phase 1: Sample locally — Dataset.sample + collect stays in driver memory.
+      // sampleSize << total n, so this is safe.
+      val fraction    = math.min(1.0, sampleSize.toDouble * 2 / cached.count())
+      val sampleArray = cached
+        .sample(withReplacement = false, fraction = fraction, seed = i.toLong)
+        .take(sampleSize)
+        .map(_.getAs[Vector]("features"))
 
-      // Tworzymy lokalne RDD z próbki (lub wywołujemy PAM bezpośrednio, w zależności od tego jak masz napisany PAM)
-      val sampleRDD = sc.parallelize(sampleArray, 2)
+      require(sampleArray.length >= k,
+        s"Sample too small: got ${sampleArray.length} points, need at least k=$k.")
 
-      // 2. Uruchamiamy klasyczny algorytm K-Medoids na maleńkiej próbce
-      val candidateModel = pam.fit(sampleRDD)
+      // Phase 2: Run PAM locally on the small sample.
+      // PAM is O(n²) — feasible only because sampleSize is small.
+      val candidateModel = pam.fitLocal(sampleArray)
 
-      // 3. Oceniamy JAKOŚĆ tej próbki na wszystkich 50 milionach punktów (Rozproszone)
-      val cost = evaluateCost(cached, candidateModel)
+      // Phase 3: Evaluate candidate model quality on the full distributed dataset.
+      val cost = evaluateCost(cached, candidateModel, spark)
 
       if (cost < minCost) {
         minCost = cost
@@ -54,33 +51,42 @@ class CLARA(
       }
     }
 
+    cached.unpersist(blocking = false)
     bestModel
   }
 
-  private def evaluateCost(data: RDD[Point], model: KMedoidsModel): Double = {
-    implicit val sc = data.sparkContext
-    val dist        = distance
-    val bcMedoids   = sc.broadcast(model.medoids)
+  /** Computes total assignment cost (sum of distances to nearest medoid)
+   *  over the full dataset using broadcast + UDF — one Spark job per sample.
+   */
+  private def evaluateCost(
+    data:  DataFrame,
+    model: KMedoidsModel,
+    spark: SparkSession
+  ): Double = {
+    import spark.implicits._
 
-    val cost = data.mapPartitions { iter =>
-      val localMedoids = bcMedoids.value
-      var partSum = 0.0
+    val bc   = spark.sparkContext.broadcast(model.medoids)
+    val dist = distance
 
-      while (iter.hasNext) {
-        val p = iter.next()
-        var minD = Double.MaxValue
-        var j    = 0
-        while (j < localMedoids.length) {
-          val d = dist.compute(localMedoids(j), p)
-          if (d < minD) minD = d
-          j += 1
-        }
-        partSum += minD
+    val costUDF: UserDefinedFunction = udf { features: Vector =>
+      val medoids = bc.value
+      var minDist = Double.MaxValue
+      var j       = 0
+      while (j < medoids.length) {
+        val d = dist.compute(features, medoids(j))
+        if (d < minDist) minDist = d
+        j += 1
       }
-      Iterator(partSum)
-    }.sum()
+      minDist
+    }
 
-    bcMedoids.unpersist(blocking = false) // 🔹 ZMIANA: Bezpieczne usuwanie z pamięci
-    cost
+    val totalCost = data
+      .select(costUDF(col("features")).as("pointCost"))
+      .agg(sum("pointCost"))
+      .as[Double]
+      .head()
+
+    bc.unpersist(blocking = false)
+    totalCost
   }
 }

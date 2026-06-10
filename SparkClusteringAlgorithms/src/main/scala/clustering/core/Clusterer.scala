@@ -1,9 +1,8 @@
 package clustering.core
 
-import org.apache.spark.rdd.RDD
-import clustering.data.Point
+import org.apache.spark.sql.DataFrame
 
 
 trait Clusterer extends Serializable {
-  def fit(data: RDD[Point]): Model
+  def fit(data: DataFrame): Model
 }

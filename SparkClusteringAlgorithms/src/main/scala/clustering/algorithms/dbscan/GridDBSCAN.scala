@@ -1,96 +1,40 @@
 package clustering.algorithms.dbscan
 
-import clustering.core.Clusterer
-import clustering.data.{DatasetOps, Point}
 import clustering.distance.{DistanceMetric, EuclideanDistance}
-import clustering.utils.{SparkUtils, UnionFind}
-import org.apache.spark.rdd.RDD
+import org.apache.spark.ml.linalg.Vector
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.functions._
 
-
-/** Grid-accelerated DBSCAN.
- *
- *  Cell side = eps → checking ±1 neighbours in each dimension is sufficient
- *  to find all eps-neighbours (cells differing by 2+ are always > eps apart).
- *  Reduces neighbourhood join from O(n²) to O(n * 3^d).
- */
+/** Grid-based DBSCAN — points are bucketed into ε-sized spatial cells and
+ *  only compared against the 3^d neighbouring cells, turning the O(n²)
+ *  cartesian into a much cheaper equi-join on the cell key (which Catalyst
+ *  can plan/shuffle efficiently). */
 class GridDBSCAN(
-  val eps: Double,
-  val minPts: Int,
-  val distance: DistanceMetric = EuclideanDistance
-) extends Clusterer {
+  eps: Double,
+  minPts: Int,
+  distance: DistanceMetric = EuclideanDistance
+) extends BaseDBSCAN(eps, minPts, distance) {
 
-  override def fit(data: RDD[Point]): DBSCANModel = {
-    val cached = DatasetOps.cachePoints(data)
-    implicit val sc = cached.sparkContext
+  override protected def findNeighborPairs(indexed: DataFrame): DataFrame = {
+    val e       = eps
+    val dist    = distance
+    val distUDF          = udf { (a: Vector, b: Vector) => dist.compute(a, b) }
+    val cellUDF          = udf { (f: Vector) => DBSCANModel.cellKey(f, e) }
+    val neighborCellsUDF = udf { (f: Vector) => DBSCANModel.neighborCellKeys(f, e) }
 
-    val cellPoints: RDD[(Vector[Int], Point)] = cached
-      .map { p =>
-        val cell = p.values.map(v => math.floor(v / eps).toInt).toVector
-        (cell, p)
-      }
-      .cache()
+    // Left side: each point fanned out across its own + neighbouring cells.
+    val left = indexed
+      .withColumn("cell", explode(neighborCellsUDF(col("features"))))
+      .select(col("id").as("id1"), col("features").as("f1"), col("cell"))
 
-    val neighborPairs: RDD[(Point, Point)] = cellPoints
-      .flatMap { case (cell, p) => neighborCells(cell).map(nc => (nc, p)) }
-      .join(cellPoints)
-      .values
-      .filter { case (p, q) => distance.compute(p, q) <= eps }
-      .cache()
+    // Right side: each point keyed by its own cell.
+    val right = indexed
+      .withColumn("cell", cellUDF(col("features")))
+      .select(col("id").as("id2"), col("features").as("f2"), col("cell"))
 
-    val corePointsArray: Array[Point] = neighborPairs
-      .map { case (p, _) => (p, 1) }
-      .reduceByKey(_ + _)
-      .filter { case (_, cnt) => cnt >= minPts }
-      .keys
-      .collect()
-
-    val corePointsSet = corePointsArray.toSet
-    val bcCorePoints  = SparkUtils.broadcastSafe(corePointsSet)
-
-    val edges: Array[(Point, Point)] = neighborPairs
-      .filter { case (p, q) =>
-        val cp = bcCorePoints.value
-        cp.contains(p) && cp.contains(q)
-      }
-      .collect()
-
-    neighborPairs.unpersist(blocking = false)
-    cellPoints.unpersist(blocking = false)
-    bcCorePoints.unpersist(blocking = false)
-
-    val coreLabels   = UnionFind.labelComponents(corePointsArray, edges)
-    val bcCoreLabels = SparkUtils.broadcastSafe(coreLabels)
-
-    val labelsRDD: RDD[(Point, Int)] = cached.mapPartitions { iter =>
-      val localLabels = bcCoreLabels.value
-      val localCores  = localLabels.keys.toArray
-      iter.map { p =>
-        if (localLabels.contains(p)) (p, localLabels(p))
-        else {
-          var i = 0; var label = -1; var found = false
-          while (i < localCores.length && !found) {
-            if (distance.compute(localCores(i), p) <= eps) {
-              label = localLabels(localCores(i)); found = true
-            }
-            i += 1
-          }
-          (p, label)
-        }
-      }
-    }
-
-    new DBSCANModel(labelsRDD, corePointsSet, eps, distance)
-  }
-
-  private def neighborCells(cell: Vector[Int]): Seq[Vector[Int]] = {
-    val offsets = Seq(-1, 0, 1)
-
-    def expand(dims: List[Int], current: Vector[Int]): Seq[Vector[Int]] =
-      dims match {
-        case Nil       => Seq(current)
-        case d :: rest => offsets.flatMap(o => expand(rest, current :+ (cell(d) + o)))
-      }
-
-    expand(cell.indices.toList, Vector.empty)
+    left.join(right, "cell")
+      .filter(col("id1") < col("id2"))          // dedup + drop self-pairs
+      .filter(distUDF(col("f1"), col("f2")) <= e)
+      .select(col("id1"), col("id2"))
   }
 }
