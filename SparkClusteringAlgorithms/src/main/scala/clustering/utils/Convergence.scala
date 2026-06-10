@@ -1,14 +1,14 @@
 package clustering.utils
 
-import clustering.data.Point
 import clustering.distance.DistanceMetric
+import org.apache.spark.ml.linalg.Vector
 
 
 object Convergence {
 
   def hasConverged(
-                    oldCentroids: Array[Point],
-                    newCentroids: Array[Point],
+                    oldCentroids: Array[Vector],
+                    newCentroids: Array[Vector],
                     eps: Double,
                     distance: DistanceMetric
                   ): Boolean = {
