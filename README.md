@@ -34,36 +34,51 @@ silently lose runs.
 
 ```mermaid
 flowchart TD
-    CONFIG["--config &lt;runId&gt;.json<br/><i>RunConfig</i>"] --> RUNNER
+  CONF[/"Plik konfiguracyjny<br/>(--config &lt;runId&gt;.json)"/] -->|"wczytanie konfiguracji (RunConfig.fromFile)"| JOB
 
-    subgraph RUNNER["BenchmarkRunner.main"]
-        R1["parse args + RunConfig.fromFile"] --> R2["resolve profile &amp; outputDir"]
+  subgraph JOB ["1. Wykonanie zadania klasteryzacji (SparkClusteringJob)"]
+    direction TB
+
+    subgraph REG ["Odwzorowanie parametrów na obiekty (Driver)"]
+      direction TB
+      DSR["Wybór źródła danych<br/>(DataSourceRegistry)"]
+      ALGOR["Wybór algorytmu<br/>(AlgorithmRegistry)"]
+      DIST["Wybór miary odległości<br/>(DistanceRegistry)"]
+
+      ALGOR -.->|"pobiera metrykę odległości"| DIST
     end
 
-    RUNNER --> JOB
-
-    subgraph JOB["SparkClusteringJob.run"]
-        J1["build SparkSession"] --> J2["attach BenchmarkListener<br/>+ ProcessCpuPlugin"]
-        J2 --> J3["execute (Try)"]
-        J3 --> J4["spark.stop → drain listener bus"]
-        J4 --> J5["read ListenerSnapshot<br/>+ ProcessMetrics"]
-        J5 --> J6["RunResult.from"]
+    subgraph CLUSTER ["Rozproszone obliczenia (Spark executors)"]
+      direction LR
+      LOAD["Ładowanie danych<br/>(DataSource.load)"] --> FIT["Właściwa klasteryzacja<br/>(Clusterer.fit)"] --> EVAL["Ewaluacja wyników<br/>(EvaluationRunner.run)"]
     end
 
-    subgraph EXEC["execute: load → fit → evaluate"]
-        E1["DataSource.load → DataFrame"] --> E2["Clusterer.fit → Model"]
-        E2 --> E3["EvaluationRunner.run → EvaluationResult"]
-    end
+    REG ==>|"przekazanie gotowych instancji"| LOAD
+  end
 
-    subgraph REG["Registries — config string to object"]
-        REGD["DataSourceRegistry → DataSource"]
-        REGA["AlgorithmRegistry → Clusterer + DistanceMetric"]
-        REGX["DistanceRegistry → DistanceMetric"]
-    end
+  subgraph TELE ["2. Zbieranie metryk"]
+    direction TB
+    BL["Metryki na poziomie silnika Spark<br/>(BenchmarkListener)"]
+    PCP["Zużycie zasobów JVM executora<br/>(ProcessCpuPlugin)"]
+  end
 
-    J3 --> EXEC
-    REG -. resolve .-> EXEC
-    J6 --> OUT["&lt;runId&gt;.json<br/><i>RunResult (ok | failed)</i>"]
+  CLUSTER -.->|"asynchroniczne eventy (Event Bus)"| BL
+  CLUSTER -.->|"próbkowanie JVM executorów (RPC)"| PCP
+
+  CLUSTER ==>|"koniec fazy obliczeniowej"| STOP
+
+  subgraph FINISH ["3. Agregacja i zakończenie"]
+    direction TB
+    STOP["Zamknięcie sesji, opróżnienie Event Busa<br/>(spark.stop())"]
+    READ["Odczyt zebranych metryk"]
+    RES["Scalenie metryk, wyników i czasów<br/>(RunResult.from)"]
+
+    STOP --> READ
+    READ --> RES
+  end
+
+  TELE --> READ
+  RES --> OUT[/"Plik wynikowy<br/>&lt;runId&gt;.json (ok | failed)"/]
 ```
 
 The pipeline is assembled from config strings by three registries, so adding an
