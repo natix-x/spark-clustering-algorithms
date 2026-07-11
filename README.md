@@ -1,90 +1,114 @@
-# SparkClusteringAlgorithms
-Master's thesis project - implementation and evaluation of Spark-based clustering algorithms.
+# spark-clustering-algorithms
 
-## Table of contents:
+Part of the Master thesis 'Performance and efficiency issues of the use of Big Data frameworks for implementation of clustering algorithms'.
+
+## Table of contents
 * [General info](#general-info)
-* [Description](#description)
+* [Architecture](#architecture)
 * [Project structure](#project-structure)
 * [Requirements](#requirements)
-* [Experiments](#experiments)
-* [Setup](#setup)
+* [Usage](#usage)
+* [Contract](#contract)
 
-### General info
-Part of master's thesis project: *"Performance and efficiency issues of the use of Big Data frameworks
-for implementation of clustering algorithms".
 
-The goal is to study the use of Big Data computing platforms for implementing clustering
-algorithms, considering both **computational performance** — scalability, resource usage,
-execution time — and the **effectiveness of the methods** in terms of the quality of the
-results. Selected clustering algorithms and their Big Data implementations are compared
-across algorithms as well as between Apache Spark and Apache Flink, in order to identify the main challenges,
-outline possible solutions, and draw conclusions about the practical application of
-clustering algorithms in Big Data environments.
+## General info
 
-### Description
-The repository contains from-scratch Spark implementations of clustering algorithms from
-three families, together with the Spark side of the benchmarking framework. It builds a
-self-contained fat jar that runs **one config in, one result out**.
+From-scratch **Scala / Spark** implementations of clustering algorithms, plus the
+Spark side of the benchmarking framework. Builds a self-contained fat jar that runs
+**one config in, one result out**.
 
-Experiment orchestration (matrix expansion, SLURM submission) and result analysis are
-**engine-agnostic** and live in the shared
-[`clustering-algorithms-benchmark`](https://github.com/natix-x/clustering-algorithms-benchmark)
-repo, which drives both this Spark jar and the Flink jar via a common JSON contract
-(`RunConfig` in, `RunResult` out). This repo only needs to keep producing results that
-validate against that contract.
+This repo owns only the algorithms and the Spark job. Experiment orchestration (matrix
+expansion, SLURM submission), the exchange **contract**, and result analysis are
+engine-agnostic and live in the shared repo: [`clustering-algorithms-benchmark`](https://github.com/natix-x/clustering-algorithms-benchmark).
 
 Implemented algorithms:
-* **Centroid-based:** K-Means
-* **Medoid-based:** PAM (naive), FastPAM, CLARA
-* **Density-based:** DBSCAN (naive and grid-based variants)
+TODO: ADD DESCRIPTIONS/DIAGRAMS/WHAT CAN BE CONFIGURED HERE
 
-Each algorithm supports pluggable distance metrics (Euclidean, Manhattan, Cosine).
-Result quality is assessed with standard metrics such as the silhouette score, cluster
-sizes, and noise fraction.
 
-### Project structure
+## Architecture
+
+`BenchmarkRunner` consumes exactly one per-run JSON config and produces exactly one JSON
+result file under `<profile.outputDir>/<runId>.json`. Failure modes still write a result
+(`status: "failed"` + `errorMessage`) and exit non-zero, so SLURM array jobs never
+silently lose runs.
+
+```mermaid
+flowchart TD
+    CONFIG["--config &lt;runId&gt;.json<br/><i>RunConfig</i>"] --> RUNNER
+
+    subgraph RUNNER["BenchmarkRunner.main"]
+        R1["parse args + RunConfig.fromFile"] --> R2["resolve profile &amp; outputDir"]
+    end
+
+    RUNNER --> JOB
+
+    subgraph JOB["SparkClusteringJob.run"]
+        J1["build SparkSession"] --> J2["attach BenchmarkListener<br/>+ ProcessCpuPlugin"]
+        J2 --> J3["execute (Try)"]
+        J3 --> J4["spark.stop → drain listener bus"]
+        J4 --> J5["read ListenerSnapshot<br/>+ ProcessMetrics"]
+        J5 --> J6["RunResult.from"]
+    end
+
+    subgraph EXEC["execute: load → fit → evaluate"]
+        E1["DataSource.load → DataFrame"] --> E2["Clusterer.fit → Model"]
+        E2 --> E3["EvaluationRunner.run → EvaluationResult"]
+    end
+
+    subgraph REG["Registries — config string to object"]
+        REGD["DataSourceRegistry → DataSource"]
+        REGA["AlgorithmRegistry → Clusterer + DistanceMetric"]
+        REGX["DistanceRegistry → DistanceMetric"]
+    end
+
+    J3 --> EXEC
+    REG -. resolve .-> EXEC
+    J6 --> OUT["&lt;runId&gt;.json<br/><i>RunResult (ok | failed)</i>"]
+```
+
+The pipeline is assembled from config strings by three registries, so adding an
+algorithm, data source, or metric is one factory entry — the runner never changes:
+
+- **`AlgorithmRegistry`** — `config.algorithm.name` → `Clusterer` factory.
+- **`DataSourceRegistry`** — `config.dataset.type` → `DataSource` factory (synthetic / Parquet).
+- **`DistanceRegistry`** — `params.distance` → `DistanceMetric` (Euclidean / Manhattan / Cosine).
+
+Core abstractions (`clustering.core`) keep algorithms uniform:
+
+- `Clusterer.fit(DataFrame): Model` — the training seam every algorithm implements.
+- `Model.assignClusters(DataFrame): DataFrame` — adds a `Columns.Prediction` column with
+  each row's cluster id. Batch-only by design: some models (e.g. DBSCAN) have no
+  meaningful per-point predict, so single-point prediction is not part of the contract.
+
+`SparkClusteringJob` wires these together for one run: load the `DataSource`, `fit` the
+`Clusterer`, evaluate the `Model`, and collect metrics into a `RunResult`.
+
+## Project structure
 ```
 .
 ├── spark/                        # Scala/Spark SBT project (the fat jar)
 │   ├── build.sbt                 # Scala/Spark build, assembly into a fat jar
 │   ├── src/main/scala/clustering/
-│   │   ├── core/                 # Clusterer / Trainer / Model abstractions
+│   │   ├── core/                 # Clusterer / Model abstractions
 │   │   ├── algorithms/           # clustering algorithms implementations
 │   │   ├── distance/             # Euclidean / Manhattan / Cosine metrics
 │   │   ├── evaluation/           # clustering metrics
-│   │   ├── utils/                # math, convergence, union-find, Spark helpers
-│   │   └── benchmark/            # benchmark runner (--config), datasource, metrics, registry
-│   └── local_run.sh              # spark-submit a single run locally
+│   │   ├── utils/                # convergence checks
+│   │   └── benchmark/            # runner (--config) + config, datasource, evaluation, metrics, registry
+│   └── ...
+├── local_run.sh                  # spark-submit a single run locally
 ├── local_testing/                # JSON configs for local single-run testing
 └── benchmark-results/            # local run outputs (one JSON result per run)
 ```
 
-Experiment orchestration (`run_experiments.py`, YAML matrices, SLURM) and `analysis/`
-now live in the [`clustering-algorithms-benchmark`](https://github.com/natix-x/clustering-algorithms-benchmark) repo.
+## Requirements
 
-### Requirements
-* JDK 8 or 11
+* JDK 11
 * Scala 2.12 / sbt (with `sbt-assembly`)
 * Apache Spark 3.3.2 (Hadoop 3)
 
-### Experiments
-A run is described by a per-run JSON config (dataset, algorithm, evaluation, Spark conf)
-that conforms to `contract/run_config.schema.json` in the benchmark repo. `BenchmarkRunner`
-consumes exactly one config and produces exactly one JSON result file (conforming to
-`contract/run_result.schema.json`), so failed runs are still recorded and array jobs never
-silently lose data.
+## Usage
 
-To run matrices on Ares (Cyfronet/PLGrid), use the benchmark repo:
-
-```bash
-# in clustering-algorithms-benchmark/
-./slurm_run.sh spark experiment_configs/scaling_horizontal.yaml
-```
-
-The benchmark repo expands the YAML matrix into per-run configs + SLURM `sbatch` files
-pointing at this repo's fat jar, and collects/analyses the results.
-
-### Setup
 Build the fat jar:
 ```bash
 cd spark
@@ -93,5 +117,18 @@ sbt assembly        # -> target/scala-2.12/spark-clustering-benchmark.jar
 
 Run a single benchmark locally (from repo root):
 ```bash
-./spark/local_run.sh local_testing/experiment_configs/example.json
+./local_run.sh local_testing/experiment_configs/example.json
 ```
+
+`local_run.sh` submits one config in `local` mode and writes the result to
+`benchmark-results/`. Each config (dataset, algorithm, evaluation, Spark conf) conforms
+to `run_config.schema.json` in the harness repo.
+
+## Contract
+TODO: To be updated later
+
+The JSON exchanged between the repos is defined by
+[`contract/README.md`](https://github.com/natix-x/clustering-algorithms-benchmark/blob/main/contract/README.md)
+in the harness repo. This jar **consumes** `run_config.schema.json` (via
+`--config <runId>.json`) and **produces** `run_result.schema.json`, so analysis is
+uniform across engines. Conformance is checked by tests, not at runtime.

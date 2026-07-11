@@ -45,3 +45,12 @@ build/
 
 ### Agent worktrees ###
 .claire/
+
+### Python ###
+__pycache__/
+*.py[cod]
+
+### Benchmark output / Spark scratch ###
+benchmark-results/
+local_testing/results/
+spark-checkpoints-*/

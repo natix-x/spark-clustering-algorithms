@@ -23,7 +23,7 @@
     "sampleSize": 10000,
     "seed": 42
   },
-  "sparkConf": {
+  "spark_config": {
     "spark.serializer": "org.apache.spark.serializer.KryoSerializer"
   }
 }

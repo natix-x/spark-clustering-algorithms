@@ -1,5 +1,5 @@
 {
-  "runId": "example-kmeans-synth-100k",
+  "runId": "example-kmeans-synth-1m",
   "profile": "local",
   "dataset": {
     "type": "synthetic",
@@ -23,7 +23,7 @@
     "sampleSize": 5000,
     "seed": 42
   },
-  "sparkConf": {
+  "spark_config": {
     "spark.serializer": "org.apache.spark.serializer.KryoSerializer"
   }
 }
