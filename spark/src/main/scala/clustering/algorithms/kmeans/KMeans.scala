@@ -1,6 +1,6 @@
 package clustering.algorithms.kmeans
 
-import clustering.core.Clusterer
+import clustering.core.{Clusterer, Columns, NearestPrototypeModel}
 import clustering.distance.{DistanceMetric, EuclideanDistance}
 import clustering.utils.Convergence
 import org.apache.spark.ml.linalg.Vector
@@ -20,7 +20,7 @@ class KMeans(
   override def fit(data: DataFrame): KMeansModel = {
     val spark = data.sparkSession
 
-    val points = data.select(col("features")).cache()
+    val points = data.select(col(Columns.Features)).cache()
     val n      = points.count()
 
     // Phase 1: Initialize centroids — random sample
@@ -30,7 +30,7 @@ class KMeans(
               fraction        = math.min(1.0, (k * 3).toDouble / n),
               seed            = seed)
       .take(k)
-      .map(_.getAs[Vector]("features"))
+      .map(_.getAs[Vector](Columns.Features))
 
     require(centroids.length == k,
       s"Could not sample $k initial centroids — dataset too small (n=$n).")
@@ -46,26 +46,18 @@ class KMeans(
       // Phase 3: Assign each point to the nearest centroid via UDF.
       // UDF is closed over the broadcast — Catalyst pipelines it with
       // the downstream groupBy without an extra shuffle.
+      val dist = distance
       val assignUDF: UserDefinedFunction = udf { features: Vector =>
-        val localCentroids = bc.value
-        var bestIdx = 0
-        var minDist = Double.MaxValue
-        var i       = 0
-        while (i < localCentroids.length) {
-          val d = distance.compute(features, localCentroids(i))
-          if (d < minDist) { minDist = d; bestIdx = i }
-          i += 1
-        }
-        bestIdx
+        NearestPrototypeModel.nearest(features, bc.value, dist)
       }
 
       // Phase 4: Aggregate per cluster with Summarizer.mean.
       // Summarizer is backed by an optimised Spark aggregate —
       // no manual (sumVector / count) arithmetic needed.
       val statsMap: Map[Int, Vector] = points
-        .withColumn("clusterId", assignUDF(col("features")))
+        .withColumn("clusterId", assignUDF(col(Columns.Features)))
         .groupBy("clusterId")
-        .agg(Summarizer.mean(col("features")).as("newCentroid"))
+        .agg(Summarizer.mean(col(Columns.Features)).as("newCentroid"))
         .collect()
         .map(r => r.getInt(0) -> r.getAs[Vector]("newCentroid"))
         .toMap

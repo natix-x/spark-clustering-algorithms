@@ -1,6 +1,6 @@
 package clustering.algorithms.dbscan
 
-import clustering.core.Model
+import clustering.core.{Columns, Model}
 import clustering.distance.DistanceMetric
 import org.apache.spark.ml.linalg.Vector
 import org.apache.spark.sql.DataFrame
@@ -24,12 +24,7 @@ class DBSCANModel(
   val distance: DistanceMetric
 ) extends Model {
 
-  override def predict(features: Vector): Int =
-    throw new UnsupportedOperationException(
-      "DBSCANModel prefers labeledData (grid join). Single-point predict is not supported."
-    )
-
-  override def labeledData(data: DataFrame): DataFrame = {
+  override def assignClusters(data: DataFrame): DataFrame = {
     val e    = eps
     val dist = distance
 
@@ -38,26 +33,26 @@ class DBSCANModel(
     val distUDF          = udf { (a: Vector, b: Vector) => dist.compute(a, b) }
 
     // Stable id so we can left-join predictions back and default noise to -1.
-    val points = data.select(col("features"))
+    val points = data.select(col(Columns.Features))
       .withColumn("rowId", monotonically_increasing_id())
 
-    val newInCells = points.withColumn("cell", cellUDF(col("features")))
+    val newInCells = points.withColumn("cell", cellUDF(col(Columns.Features)))
 
     val coreInCells = labeledCorePoints
-      .withColumn("cell", explode(neighborCellsUDF(col("features"))))
-      .select(col("cell"), col("features").as("coreFeatures"), col("clusterId"))
+      .withColumn("cell", explode(neighborCellsUDF(col(Columns.Features))))
+      .select(col("cell"), col(Columns.Features).as("coreFeatures"), col("clusterId"))
 
     val matched = newInCells
       .join(coreInCells, "cell")
-      .filter(distUDF(col("features"), col("coreFeatures")) <= e)
+      .filter(distUDF(col(Columns.Features), col("coreFeatures")) <= e)
       .groupBy("rowId")
       .agg(min("clusterId").as("matchedCluster"))
 
     points
       .join(matched, Seq("rowId"), "left_outer")
       .select(
-        col("features"),
-        coalesce(col("matchedCluster"), lit(-1)).as("prediction")
+        col(Columns.Features),
+        coalesce(col("matchedCluster"), lit(-1)).as(Columns.Prediction)
       )
   }
 }

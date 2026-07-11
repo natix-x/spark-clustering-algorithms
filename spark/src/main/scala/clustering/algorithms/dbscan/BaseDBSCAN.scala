@@ -72,7 +72,7 @@ abstract class BaseDBSCAN(
     val toClusterId = udf { (l: Long) => bcMap.value(l) }
 
     // Step 5: labelled core points — the model re-predicts borders/noise via a
-    // grid join at evaluation time (see DBSCANModel.labeledData).
+    // grid join at evaluation time (see DBSCANModel.assignClusters).
     val labeledCorePoints = coreLabels
       .join(indexed, "id")
       .select(col("features"), toClusterId(col("label")).as("clusterId"))
