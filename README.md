@@ -21,6 +21,8 @@ This repo owns only the algorithms and the Spark job. Experiment orchestration (
 expansion, SLURM submission), the exchange **contract**, and result analysis are
 engine-agnostic and live in the shared repo: [`clustering-algorithms-benchmark`](https://github.com/natix-x/clustering-algorithms-benchmark).
 
+> **Note:** Some documentation and diagrams are in Polish, as the master thesis they accompany is written in Polish.
+
 Implemented algorithms:
 TODO: ADD DESCRIPTIONS/DIAGRAMS/WHAT CAN BE CONFIGURED HERE
 
@@ -28,7 +30,7 @@ TODO: ADD DESCRIPTIONS/DIAGRAMS/WHAT CAN BE CONFIGURED HERE
 ## Architecture
 
 `BenchmarkRunner` consumes exactly one per-run JSON config and produces exactly one JSON
-result file under `<profile.outputDir>/<runId>.json`. Failure modes still write a result
+result file under `<outputDir>/<runId>.json`. Failure modes still write a result
 (`status: "failed"` + `errorMessage`) and exit non-zero, so SLURM array jobs never
 silently lose runs.
 
@@ -39,7 +41,7 @@ flowchart TD
   subgraph JOB ["1. Wykonanie zadania klasteryzacji (SparkClusteringJob)"]
     direction TB
 
-    subgraph REG ["Odwzorowanie parametrów na obiekty (Driver)"]
+    subgraph REG ["Odwzorowanie parametrów na obiekty (Spark Driver)"]
       direction TB
       DSR["Wybór źródła danych<br/>(DataSourceRegistry)"]
       ALGOR["Wybór algorytmu<br/>(AlgorithmRegistry)"]
@@ -53,10 +55,10 @@ flowchart TD
       LOAD["Ładowanie danych<br/>(DataSource.load)"] --> FIT["Właściwa klasteryzacja<br/>(Clusterer.fit)"] --> EVAL["Ewaluacja wyników<br/>(EvaluationRunner.run)"]
     end
 
-    REG ==>|"przekazanie gotowych instancji"| LOAD
+    REG -->|"przekazanie gotowych instancji"| LOAD
   end
 
-  subgraph TELE ["2. Zbieranie metryk"]
+  subgraph TELE ["Zbieranie metryk (w tle, równolegle)"]
     direction TB
     BL["Metryki na poziomie silnika Spark<br/>(BenchmarkListener)"]
     PCP["Zużycie zasobów JVM executora<br/>(ProcessCpuPlugin)"]
@@ -65,9 +67,9 @@ flowchart TD
   CLUSTER -.->|"asynchroniczne eventy (Event Bus)"| BL
   CLUSTER -.->|"próbkowanie JVM executorów (RPC)"| PCP
 
-  CLUSTER ==>|"koniec fazy obliczeniowej"| STOP
+  CLUSTER -->|"koniec obliczeń"| STOP
 
-  subgraph FINISH ["3. Agregacja i zakończenie"]
+  subgraph FINISH ["2. Agregacja i zakończenie"]
     direction TB
     STOP["Zamknięcie sesji, opróżnienie Event Busa<br/>(spark.stop())"]
     READ["Odczyt zebranych metryk"]
@@ -77,7 +79,7 @@ flowchart TD
     READ --> RES
   end
 
-  TELE --> READ
+  TELE -.->|"zrzuty metryk"| READ
   RES --> OUT[/"Plik wynikowy<br/>&lt;runId&gt;.json (ok | failed)"/]
 ```
 
@@ -90,7 +92,7 @@ algorithm, data source, or metric is one factory entry — the runner never chan
 
 Core abstractions (`clustering.core`) keep algorithms uniform:
 
-- `Clusterer.fit(DataFrame): Model` — the training seam every algorithm implements.
+- `Clusterer.fit(DataFrame): Model` — the fitting seam every algorithm implements.
 - `Model.assignClusters(DataFrame): DataFrame` — adds a `Columns.Prediction` column with
   each row's cluster id. Batch-only by design: some models (e.g. DBSCAN) have no
   meaningful per-point predict, so single-point prediction is not part of the contract.
@@ -140,10 +142,22 @@ Run a single benchmark locally (from repo root):
 to `run_config.schema.json` in the harness repo.
 
 ## Contract
-TODO: To be updated later
 
 The JSON exchanged between the repos is defined by
 [`contract/README.md`](https://github.com/natix-x/clustering-algorithms-benchmark/blob/main/contract/README.md)
 in the harness repo. This jar **consumes** `run_config.schema.json` (via
 `--config <runId>.json`) and **produces** `run_result.schema.json`, so analysis is
-uniform across engines. Conformance is checked by tests, not at runtime.
+uniform across engines.
+
+Conformance is verified by a test, not at runtime. `SparkClusteringJobContractSpec`
+runs a real `SparkClusteringJob` on a tiny synthetic dataset and asserts that the
+emitted `RunResult` validates against the vendored `run_result.schema.json`
+(`spark/src/test/resources/`). It covers both an `ok` run and a `failed` run
+(unknown algorithm), and because the schema is `additionalProperties: false`, any
+Scala field not declared in the contract makes the test fail — guarding against
+schema drift.
+
+```bash
+cd spark
+sbt "testOnly clustering.benchmark.SparkClusteringJobContractSpec"
+```
