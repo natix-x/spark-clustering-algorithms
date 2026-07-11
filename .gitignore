@@ -42,3 +42,6 @@ build/
 
 ### Scala ###
 .bsp/
+
+### Agent worktrees ###
+.claire/

@@ -23,8 +23,15 @@ clustering algorithms in Big Data environments.
 
 ### Description
 The repository contains from-scratch Spark implementations of clustering algorithms from
-three families, together with a benchmarking framework used to run reproducible
-experiments and collect performance and quality metrics.
+three families, together with the Spark side of the benchmarking framework. It builds a
+self-contained fat jar that runs **one config in, one result out**.
+
+Experiment orchestration (matrix expansion, SLURM submission) and result analysis are
+**engine-agnostic** and live in the shared
+[`clustering-algorithms-benchmark`](https://github.com/natix-x/clustering-algorithms-benchmark)
+repo, which drives both this Spark jar and the Flink jar via a common JSON contract
+(`RunConfig` in, `RunResult` out). This repo only needs to keep producing results that
+validate against that contract.
 
 Implemented algorithms:
 * **Centroid-based:** K-Means
@@ -37,55 +44,54 @@ sizes, and noise fraction.
 
 ### Project structure
 ```
-SparkClusteringAlgorithms/
-├── build.sbt                     # Scala/Spark build, assembly into a fat jar
-├── src/main/scala/clustering/
-│   ├── core/                     # Clusterer / Trainer / Model abstractions
-│   ├── algorithms/               # clustering algorithms implementations
-│   ├── distance/                 # Euclidean / Manhattan / Cosine metrics
-│   ├── evaluation/               # clustering metrics
-│   ├── utils/                    # math, convergence, union-find, Spark helpers
-│   └── benchmark/                # benchmark runner, datasource, metrics, registry
-├── experiments/                  # Python: generate & submit SLURM job arrays
-│   ├── run_experiments.py        # entry point (YAML matrix -> per-run configs + sbatch)
-│   └── experiment_configs/       # YAML experiment matrices (scaling, comparison, ...)
+.
+├── spark/                        # Scala/Spark SBT project (the fat jar)
+│   ├── build.sbt                 # Scala/Spark build, assembly into a fat jar
+│   ├── src/main/scala/clustering/
+│   │   ├── core/                 # Clusterer / Trainer / Model abstractions
+│   │   ├── algorithms/           # clustering algorithms implementations
+│   │   ├── distance/             # Euclidean / Manhattan / Cosine metrics
+│   │   ├── evaluation/           # clustering metrics
+│   │   ├── utils/                # math, convergence, union-find, Spark helpers
+│   │   └── benchmark/            # benchmark runner (--config), datasource, metrics, registry
+│   └── local_run.sh              # spark-submit a single run locally
 ├── local_testing/                # JSON configs for local single-run testing
-└── local_run.sh                  # spark-submit a single run locally
-analysis/                         # Python analysis & figures from collected results
+└── benchmark-results/            # local run outputs (one JSON result per run)
 ```
+
+Experiment orchestration (`run_experiments.py`, YAML matrices, SLURM) and `analysis/`
+now live in the [`clustering-algorithms-benchmark`](https://github.com/natix-x/clustering-algorithms-benchmark) repo.
 
 ### Requirements
 * JDK 8 or 11
 * Scala 2.12 / sbt (with `sbt-assembly`)
 * Apache Spark 3.3.2 (Hadoop 3)
-* Python 3.12+ (`pyyaml`; analysis: `numpy`, `pandas`, `matplotlib`, `scikit-learn`)
 
 ### Experiments
-A run is described by a per-run JSON config (dataset, algorithm, evaluation, Spark conf).
-`BenchmarkRunner` consumes exactly one config and produces exactly one JSON result file,
-so failed runs are still recorded and array jobs never silently lose data.
+A run is described by a per-run JSON config (dataset, algorithm, evaluation, Spark conf)
+that conforms to `contract/run_config.schema.json` in the benchmark repo. `BenchmarkRunner`
+consumes exactly one config and produces exactly one JSON result file (conforming to
+`contract/run_result.schema.json`), so failed runs are still recorded and array jobs never
+silently lose data.
 
-For cluster experiments on Ares (Cyfronet/PLGrid), an experiment matrix is defined in YAML
-(varying nodes, resources, algorithms, datasets, with repetitions). `run_experiments.py`
-expands the matrix into independent per-run configs and SLURM `sbatch` files:
+To run matrices on Ares (Cyfronet/PLGrid), use the benchmark repo:
 
 ```bash
-cd SparkClusteringAlgorithms/experiments
-python run_experiments.py experiment_configs/scaling_horizontal.yaml
+# in clustering-algorithms-benchmark/
+./slurm_run.sh spark experiment_configs/scaling_horizontal.yaml
 ```
 
-Provided matrices cover horizontal scaling, vertical scaling (CPU / memory), algorithm
-comparison, and cluster topology. Collected JSON results are then analysed under
-`analysis/` to produce the scaling, efficiency and reproducibility figures.
+The benchmark repo expands the YAML matrix into per-run configs + SLURM `sbatch` files
+pointing at this repo's fat jar, and collects/analyses the results.
 
 ### Setup
 Build the fat jar:
 ```bash
-cd SparkClusteringAlgorithms
+cd spark
 sbt assembly        # -> target/scala-2.12/spark-clustering-benchmark.jar
 ```
 
-Run a single benchmark locally:
+Run a single benchmark locally (from repo root):
 ```bash
-./local_run.sh local_testing/experiment_configs/example.json
+./spark/local_run.sh local_testing/experiment_configs/example.json
 ```
