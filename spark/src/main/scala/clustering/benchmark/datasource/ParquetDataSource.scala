@@ -1,5 +1,6 @@
 package clustering.benchmark.datasource
 
+import clustering.core.Columns
 import org.apache.spark.ml.feature.VectorAssembler
 import org.apache.spark.ml.functions.array_to_vector
 import org.apache.spark.ml.linalg.SQLDataTypes.VectorType
@@ -38,6 +39,10 @@ final class ParquetDataSource(
     featureColumns.isDefined ^ featureColumn.isDefined,
     "ParquetDataSource: exactly one of featureColumns or featureColumn must be set"
   )
+  require(
+    repartition.forall(_ > 0),
+    s"ParquetDataSource: repartition must be > 0 if set, got ${repartition.orNull}"
+  )
 
   override val name: String = "parquet"
 
@@ -58,21 +63,21 @@ final class ParquetDataSource(
         val casted = df0.selectExpr(cols.map(c => s"CAST(`$c` AS DOUBLE) AS `$c`"): _*)
         new VectorAssembler()
           .setInputCols(cols.toArray)
-          .setOutputCol("features")
+          .setOutputCol(Columns.Features)
           .transform(casted)
-          .select(col("features"))
+          .select(col(Columns.Features))
 
       case None =>
         // Single-column layout: already a Vector, or an Array of numbers.
         val c  = featureColumn.get
         val dt = df0.schema(c).dataType
         if (dt == VectorType) {
-          df0.select(col(c).as("features"))
+          df0.select(col(c).as(Columns.Features))
         } else dt match {
           case _: ArrayType =>
             // Cast array elements to double, then pack into a Vector.
             df0.select(
-              array_to_vector(expr(s"transform(`$c`, x -> CAST(x AS DOUBLE))")).as("features")
+              array_to_vector(expr(s"transform(`$c`, x -> CAST(x AS DOUBLE))")).as(Columns.Features)
             )
           case other =>
             throw new IllegalArgumentException(
@@ -82,8 +87,10 @@ final class ParquetDataSource(
     }
 
     repartition match {
-      case Some(p) if p > 0 && p != features.rdd.getNumPartitions =>
-        if (p < features.rdd.getNumPartitions) features.coalesce(p)
+      case Some(p) if p > 0 =>
+        val current = features.rdd.getNumPartitions
+        if (p == current) features
+        else if (p < current) features.coalesce(p)
         else features.repartition(p)
       case _ => features
     }

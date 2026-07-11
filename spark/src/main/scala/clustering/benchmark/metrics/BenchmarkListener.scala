@@ -1,10 +1,9 @@
 package clustering.benchmark.metrics
 
-// TODO: investigate if we could add something more here, leaving it for now
 import org.apache.spark.Success
 import org.apache.spark.scheduler._
 
-import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
+import java.util.concurrent.atomic.AtomicLong
 
 /** Accumulates execution metrics from a running Spark job.
  *
@@ -21,33 +20,33 @@ final class BenchmarkListener extends SparkListener {
   private val inputBytes        = new AtomicLong(0L)
   private val outputBytes       = new AtomicLong(0L)
 
-  // ── Spill (za mała pamięć → Spark zapisuje na dysk) ───────────────────────
+  // ── Spill (too little memory → Spark writes to disk) ──────────────────────
   private val diskBytesSpilled   = new AtomicLong(0L)
   private val memoryBytesSpilled = new AtomicLong(0L)
 
   // ── CPU ───────────────────────────────────────────────────────────────────
   private val jvmGcTimeMs     = new AtomicLong(0L)
-  /** Czas CPU faktycznie zajętego obliczeniami [ns]. */
-  private val executorCpuTime = new AtomicLong(0L)
-  /** Całkowity czas wykonania tasków [ms] — mianownik dla CPU efficiency. */
+  // Whole-JVM process CPU (Flink-comparable) comes from ProcessCpuPlugin, not the
+  // per-task TaskMetrics.executorCpuTime — so we don't accumulate the latter here.
+  /** Total task execution time [ms]. */
   private val executorRunTime = new AtomicLong(0L)
 
-  // ── Sieć / Shuffle timing ─────────────────────────────────────────────────
-  /** Czas oczekiwania na dane z innych węzłów podczas shuffle fetch [ms]. */
+  // ── Network / Shuffle timing ──────────────────────────────────────────────
+  /** Time spent waiting for data from other nodes during shuffle fetch [ms]. */
   private val shuffleFetchWaitTime = new AtomicLong(0L)
-  /** Czas zapisu shuffle [ns]. */
+  /** Shuffle write time [ns]. */
   private val shuffleWriteTime     = new AtomicLong(0L)
 
-  // ── Taski i stagi ─────────────────────────────────────────────────────────
+  // ── Tasks and stages ──────────────────────────────────────────────────────
   private val taskCount       = new AtomicLong(0L)
   private val failedTaskCount = new AtomicLong(0L)
   private val stageCount      = new AtomicLong(0L)
   private val totalStageMs    = new AtomicLong(0L)
 
-  // ── Unified memory: rozbicie execution/storage (spark-only) ───────────────
-  // Peak per-executor wartości z ExecutorMetrics (Spark 3.0+), dostarczane przez
-  // onStageExecutorMetrics. Trzymamy MAX po wszystkich executorach/stage'ach —
-  // analogicznie do peakExecutorMemoryBytes (najcięższy worker).
+  // ── Unified memory: execution/storage split (spark-only) ──────────────────
+  // Peak per-executor values from ExecutorMetrics (Spark 3.0+), delivered via
+  // onStageExecutorMetrics. We keep the MAX across all executors/stages —
+  // analogous to peakExecutorMemoryBytes (the heaviest worker).
   private val peakOnHeapExecution = new AtomicLong(0L)
   private val peakOnHeapStorage   = new AtomicLong(0L)
   private val peakOnHeapUnified   = new AtomicLong(0L)
@@ -55,10 +54,6 @@ final class BenchmarkListener extends SparkListener {
   // Peak executor memory is collected by ProcessCpuPlugin (whole-JVM heap sampled
   // on each worker), not here: Spark delivers no executor metric updates in local
   // mode, and the plugin path matches Flink's Status.JVM.Memory.Heap.Used.
-
-  // ── Czas joba ─────────────────────────────────────────────────────────────
-  private val firstJobStart = new AtomicReference[Option[Long]](None)
-  private val lastJobEnd    = new AtomicReference[Option[Long]](None)
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
@@ -70,7 +65,6 @@ final class BenchmarkListener extends SparkListener {
     if (m == null) return
 
     jvmGcTimeMs.addAndGet(m.jvmGCTime)
-    executorCpuTime.addAndGet(m.executorCpuTime)
     executorRunTime.addAndGet(m.executorRunTime)
     diskBytesSpilled.addAndGet(m.diskBytesSpilled)
     memoryBytesSpilled.addAndGet(m.memoryBytesSpilled)
@@ -104,23 +98,14 @@ final class BenchmarkListener extends SparkListener {
   }
 
   override def onStageExecutorMetrics(m: SparkListenerStageExecutorMetrics): Unit = {
-    def upd(a: AtomicLong, name: String): Unit = {
-      val v = m.executorMetrics.getMetricValue(name)
-      a.updateAndGet(prev => math.max(prev, v))
+    def updatePeak(peak: AtomicLong, metricName: String): Unit = {
+      val value = m.executorMetrics.getMetricValue(metricName)
+      peak.updateAndGet(prev => math.max(prev, value))
     }
-    upd(peakOnHeapExecution, "OnHeapExecutionMemory")
-    upd(peakOnHeapStorage,   "OnHeapStorageMemory")
-    upd(peakOnHeapUnified,   "OnHeapUnifiedMemory")
+    updatePeak(peakOnHeapExecution, "OnHeapExecutionMemory")
+    updatePeak(peakOnHeapStorage,   "OnHeapStorageMemory")
+    updatePeak(peakOnHeapUnified,   "OnHeapUnifiedMemory")
   }
-
-  override def onJobStart(jobStart: SparkListenerJobStart): Unit =
-    firstJobStart.updateAndGet {
-      case None    => Some(jobStart.time)
-      case current => current
-    }
-
-  override def onJobEnd(jobEnd: SparkListenerJobEnd): Unit =
-    lastJobEnd.set(Some(jobEnd.time))
 
   /** Snapshot of all collected metrics; safe to call after job completion. */
   def snapshot(): BenchmarkListener.ListenerSnapshot =
@@ -132,7 +117,6 @@ final class BenchmarkListener extends SparkListener {
       diskBytesSpilled        = diskBytesSpilled.get(),
       memoryBytesSpilled      = memoryBytesSpilled.get(),
       jvmGcTimeMs             = jvmGcTimeMs.get(),
-      executorCpuTimeNs       = executorCpuTime.get(),
       executorRunTimeMs       = executorRunTime.get(),
       shuffleFetchWaitTimeMs  = shuffleFetchWaitTime.get(),
       shuffleWriteTimeNs      = shuffleWriteTime.get(),
@@ -142,9 +126,7 @@ final class BenchmarkListener extends SparkListener {
       totalStageMs            = totalStageMs.get(),
       peakOnHeapExecutionBytes = peakOnHeapExecution.get(),
       peakOnHeapStorageBytes   = peakOnHeapStorage.get(),
-      peakOnHeapUnifiedBytes   = peakOnHeapUnified.get(),
-      firstJobStartMs         = firstJobStart.get(),
-      lastJobEndMs            = lastJobEnd.get()
+      peakOnHeapUnifiedBytes   = peakOnHeapUnified.get()
     )
 }
 
@@ -161,12 +143,11 @@ object BenchmarkListener {
     memoryBytesSpilled:      Long,
     // CPU
     jvmGcTimeMs:             Long,
-    executorCpuTimeNs:       Long,
     executorRunTimeMs:       Long,
-    // Sieć
+    // Network
     shuffleFetchWaitTimeMs:  Long,
     shuffleWriteTimeNs:      Long,
-    // Taski / stagi
+    // Tasks / stages
     taskCount:               Long,
     failedTaskCount:         Long,
     stageCount:              Long,
@@ -174,9 +155,6 @@ object BenchmarkListener {
     // Unified memory (execution/storage split, spark-only)
     peakOnHeapExecutionBytes: Long,
     peakOnHeapStorageBytes:   Long,
-    peakOnHeapUnifiedBytes:   Long,
-    // Czas
-    firstJobStartMs:         Option[Long],
-    lastJobEndMs:            Option[Long]
+    peakOnHeapUnifiedBytes:   Long
   )
 }

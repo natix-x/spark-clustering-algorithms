@@ -1,61 +1,56 @@
 package clustering.benchmark.evaluation
 
 import clustering.benchmark.config.EvaluationSpec
-import clustering.core.Model
+import clustering.core.{Columns, Model}
 import clustering.distance.DistanceMetric
 import clustering.evaluation.SilhouetteEvaluator
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.functions.col
-import org.apache.spark.storage.StorageLevel
+import org.apache.spark.sql.types.IntegerType
 
-/** Quality metrics computed after `fit()`.
- *
- *  Bundles silhouette (optional, gated by `metrics` config) with cheap
- *  per-cluster statistics. Silhouette is O(n^2) in
- *  [[clustering.evaluation.SilhouetteEvaluator]], so for big data sets the
- *  caller should set `evaluation.sampleSize` to a tractable number
- *  (e.g. 10_000).
- */
 final class EvaluationRunner(distance: DistanceMetric) {
 
-  /** Runs the evaluation suite over the dataset.
-   *  Optionally accepts a pre-computed row count to avoid a redundant
-   *  `data.count()` scan inside silhouette sampling.
-   */
   def run(model: Model, data: DataFrame, spec: EvaluationSpec, knownTotalRows: Option[Long] = None): EvaluationResult = {
-    val labeled = model.labeledData(data)
-    labeled.persist(StorageLevel.MEMORY_AND_DISK)
+    val metrics       = spec.metrics.toSet
+    val wantSizes     = metrics.contains("clusterSizes")
+    val wantNoise     = metrics.contains("noiseFraction")
+    val wantNClusters = metrics.contains("nClusters")
 
-    val sizes = labeled
-      .groupBy(col("prediction"))
+    // clusterSizes, noiseFraction and nClusters all derive from one assignment
+    // scan; run it once iff at least one of them is requested. Everything the
+    // config didn't ask for stays None, so the result omits it (see RunResult).
+    val sizes: Option[Map[Int, Long]] =
+      if (wantSizes || wantNoise || wantNClusters) Some(computeSizes(model, data)) else None
+
+    EvaluationResult(
+      silhouette    = if (metrics.contains("silhouette")) Some(computeSilhouette(model, data, spec, knownTotalRows)) else None,
+      nClusters     = if (wantNClusters) sizes.map(_.keys.count(_ >= 0)) else None,
+      noiseFraction = if (wantNoise)     sizes.map(noiseFractionOf)      else None,
+      clusterSizes  = if (wantSizes)     sizes                           else None
+    )
+  }
+
+  /** Cluster id -> size, from a single collect. Cast prediction to Int so the
+   *  read is independent of each model's label dtype. */
+  private def computeSizes(model: Model, data: DataFrame): Map[Int, Long] =
+    model.assignClusters(data)
+      .groupBy(col(Columns.Prediction).cast(IntegerType).as(Columns.Prediction))
       .count()
       .collect()
       .map(r => r.getInt(0) -> r.getLong(1))
       .toMap
 
-    val totalLabeled  = sizes.values.sum
-    val noiseCount    = sizes.getOrElse(-1, 0L)
-    val noiseFraction = if (totalLabeled == 0L) 0.0 else noiseCount.toDouble / totalLabeled
-    val nClusters     = sizes.keys.count(_ >= 0)
-
-    val silhouette: Option[Double] =
-      if (!spec.metrics.contains("silhouette")) None
-      else Some(computeSilhouette(model, data, spec, knownTotalRows))
-
-    labeled.unpersist(blocking = false)
-
-    EvaluationResult(
-      silhouette    = silhouette,
-      nClusters     = nClusters,
-      noiseFraction = noiseFraction,
-      clusterSizes  = sizes
-    )
+  /** Fraction of points labelled noise (cluster id -1). */
+  private def noiseFractionOf(sizes: Map[Int, Long]): Double = {
+    val totalLabeled = sizes.values.sum
+    val noiseCount   = sizes.getOrElse(-1, 0L)
+    if (totalLabeled == 0L) 0.0 else noiseCount.toDouble / totalLabeled
   }
 
   /** Silhouette on the full data set or a uniform sample, depending on spec.
    *  Sampling is essential for big data — the underlying evaluator is O(n^2). */
   private def computeSilhouette(model: Model, data: DataFrame, spec: EvaluationSpec, knownTotalRows: Option[Long]): Double = {
-    val evaluator = new SilhouetteEvaluator(distance)
+    val evaluator = new SilhouetteEvaluator(distance) // TODO: refactor this part of the code
     spec.sampleSize.filter(_ > 0) match {
       case None =>
         evaluator.evaluate(model, data)
@@ -71,9 +66,17 @@ final class EvaluationRunner(distance: DistanceMetric) {
   }
 }
 
+/** Evaluation outputs. Every field is optional: only the metrics named in
+ *  `EvaluationSpec.metrics` are computed, the rest stay None (and are omitted
+ *  from the emitted RunResult). */
 final case class EvaluationResult(
   silhouette:    Option[Double],
-  nClusters:     Int,
-  noiseFraction: Double,
-  clusterSizes:  Map[Int, Long]
+  nClusters:     Option[Int],
+  noiseFraction: Option[Double],
+  clusterSizes:  Option[Map[Int, Long]]
 )
+
+object EvaluationResult {
+  /** No metrics computed — used for a failed run. */
+  val empty: EvaluationResult = EvaluationResult(None, None, None, None)
+}

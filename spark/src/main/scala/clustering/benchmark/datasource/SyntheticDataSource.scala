@@ -1,5 +1,7 @@
 package clustering.benchmark.datasource
 
+import clustering.benchmark.config.Params
+import clustering.core.Columns
 import org.apache.spark.ml.linalg.{Vector, Vectors}
 import org.apache.spark.ml.linalg.SQLDataTypes.VectorType
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
@@ -10,10 +12,9 @@ import scala.util.Random
 
 /** Generates the 5-mode 3D mixture used as a stress test for the algorithms.
  *
- *  Same distribution as the original `Main.scala` (noise + two overlapping
- *  Gaussians + an elongated mode + a dense distant mode); now parameterized
- *  by config so a single matrix entry can scale n by orders of magnitude
- *  without recompiling.
+ *  Five modes — noise + two overlapping Gaussians + an elongated mode + a dense
+ *  distant mode — parameterized by config so a single matrix entry can scale n
+ *  by orders of magnitude without recompiling.
  *
  *  Params (all optional except `numPoints`):
  *    - numPoints: Long
@@ -25,6 +26,9 @@ final class SyntheticDataSource(
   val numPartitions: Int,
   val seed: Long
 ) extends DataSource {
+
+  require(numPoints >= 0L, s"SyntheticDataSource: numPoints must be >= 0, got $numPoints")
+  require(numPartitions > 0, s"SyntheticDataSource: numPartitions must be > 0, got $numPartitions")
 
   override val name: String = "synthetic-5mix-3d"
 
@@ -47,34 +51,28 @@ final class SyntheticDataSource(
         val rng = new Random(localSeed + partIdx * 0x9E3779B97F4A7C15L)
         iter.map(_ => Row(SyntheticDataSource.samplePoint(rng)))
       }
-    val schema = StructType(Seq(StructField("features", VectorType, nullable = false)))
+    val schema = StructType(Seq(StructField(Columns.Features, VectorType, nullable = false)))
     spark.createDataFrame(rowRdd, schema)
   }
 }
 
 object SyntheticDataSource {
 
-  private implicit val formats: Formats = DefaultFormats
-
   object Factory extends DataSource.Factory {
     val typeName: String = "synthetic"
 
     def create(params: JObject): DataSource = {
-      val numPoints = (params \ "numPoints").extract[Long]
-      val numPartitions = (params \ "numPartitions") match {
-        case JNothing => 8
-        case v        => v.extract[Int]
-      }
-      val seed = (params \ "seed") match {
-        case JNothing => 42L
-        case v        => v.extract[Long]
-      }
-      new SyntheticDataSource(numPoints, numPartitions, seed)
+      val p = Params(params)
+      new SyntheticDataSource(
+        numPoints     = p.long("numPoints"),
+        numPartitions = p.intOpt("numPartitions", 8),
+        seed          = p.longOpt("seed", 42L)
+      )
     }
   }
 
-  /** One sample from the 5-mode mixture. Mirrors the original Main.scala
-   *  generator: noise / twin-A / twin-B / cigar / micro-dense. */
+  /** One sample from the 5-mode mixture:
+   *  noise / twin-A / twin-B / cigar / micro-dense. */
   private def samplePoint(rng: Random): Vector = {
     val r = rng.nextDouble()
     if (r < 0.05) {

@@ -1,20 +1,10 @@
 package clustering.benchmark
 
 import clustering.benchmark.config.RunConfig
-import clustering.benchmark.framework.SparkClusteringJob
 import clustering.benchmark.metrics.RunResult
 import org.log4s.getLogger
 
 
-/** Entry point for one benchmark run.
- *
- *  Usage: `spark-submit ... benchmark.jar --config <path-to-run.json>`
- *
- *  Exactly one config file produces exactly one JSON result file under
- *  `<profile.outputDir>/<runId>.json`. Failure modes still write a result
- *  file (with `status: "failed"` and `errorMessage`) so SLURM array jobs
- *  never silently lose runs.
- */
 object BenchmarkRunner {
   private val logger = getLogger
 
@@ -23,14 +13,14 @@ object BenchmarkRunner {
     val config = RunConfig.fromFile(parsed.configPath)
 
     val profile = RunConfig.resolveProfile(config)
-    val outputDir = RunConfig.resolveOutputDir(config, profile)
+    val outputDir = RunConfig.resolveOutputDir(config)
 
     val job = new SparkClusteringJob
     val result = job.run(config, profile)
     val path = RunResult.writeToDir(result, outputDir)
 
     logger.info(s"runId=${result.runId} status=${result.status} " +
-      s"algo=${result.algorithm} fitMs=${result.fitDurationMs} " +
+      s"algorithm=${result.algorithm} fitMs=${result.fitDurationMs} " +
       s"totalMs=${result.totalDurationMs} nRows=${result.nRows} " +
       s"silhouette=${result.silhouette.getOrElse("n/a")} -> $path")
 
@@ -44,7 +34,10 @@ object BenchmarkRunner {
     val it = args.iterator
     while (it.hasNext) {
       it.next() match {
-        case "--config" => configPath = Some(it.next())
+        case "--config" if it.hasNext => configPath = Some(it.next())
+        case "--config" =>
+          logger.error(s"--config requires a value\n${usage()}")
+          sys.exit(64)
         case "--help" | "-h" =>
           println(usage()); sys.exit(0)
         case other =>

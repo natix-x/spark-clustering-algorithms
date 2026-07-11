@@ -1,10 +1,13 @@
 package clustering.benchmark.metrics
 
+import clustering.benchmark.config.RunConfig
+import clustering.benchmark.evaluation.EvaluationResult
+import clustering.benchmark.metrics.BenchmarkListener.ListenerSnapshot
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
 
 import java.nio.charset.StandardCharsets
-import java.nio.file.{Files, Path, Paths, StandardOpenOption}
+import java.nio.file.{AtomicMoveNotSupportedException, Files, Path, Paths, StandardCopyOption, StandardOpenOption}
 
 /** One row of benchmark output. Flat by design so analysis in pandas is
  *  a single `pd.read_json` over the results directory.
@@ -48,7 +51,7 @@ final case class RunResult(
   inputBytes:              Long,
   outputBytes:             Long,
 
-  // Spark listener — spill (> 0 oznacza za mało pamięci dla executora)
+  // Spark listener — spill (> 0 means the executor ran short of memory)
   diskBytesSpilled:        Long,
   memoryBytesSpilled:      Long,
 
@@ -58,11 +61,11 @@ final case class RunResult(
   executorRunTimeMs:       Long,
   avgCpuCoresBusy:         Option[Double],   // cpu / (totalDurationMs * 1e6) = avg cores busy; cross-comparable
 
-  // Spark listener — sieć / shuffle timing
+  // Spark listener — network / shuffle timing
   shuffleFetchWaitTimeMs:  Long,
   shuffleWriteTimeNs:      Long,
 
-  // Spark listener — taski / stagi / pamięć
+  // Spark listener — tasks / stages / memory
   taskCount:               Long,
   failedTaskCount:         Long,
   stageCount:              Long,
@@ -77,31 +80,132 @@ final case class RunResult(
   peakOnHeapStorageBytes:   Long,  // peak storage region (cache/broadcast)
   peakOnHeapUnifiedBytes:   Long,  // peak whole unified pool (execution + storage)
 
-  // evaluation
-  nClusters:           Int,
-  noiseFraction:       Double,
+  // evaluation — each is present only when the run requested that metric
+  // (EvaluationSpec.metrics); otherwise None, and json4s omits the key.
+  nClusters:           Option[Int],
+  noiseFraction:       Option[Double],
   silhouette:          Option[Double],
-  clusterSizes:        Map[String, Long]         // keys are stringified cluster ids for JSON friendliness
-) {
-  /** CPU efficiency: jaka część czasu executor faktycznie liczył [0.0–1.0].
-   *  Wartości < 0.3 sugerują bottleneck sieci lub I/O.
-   *  None gdy executorRunTimeMs == 0 (np. run zakończony błędem przed wykonaniem tasków).
-   */
-  def cpuEfficiency: Option[Double] =
-    if (executorRunTimeMs == 0L) None
-    else Some((executorCpuTimeNs / 1e6) / executorRunTimeMs)
-}
+  clusterSizes:        Option[Map[String, Long]]  // keys are stringified cluster ids for JSON friendliness
+)
 
 object RunResult {
 
   private implicit val formats: Formats = DefaultFormats
 
-  /** Average number of CPU cores busy over the run: {@code cpuNs / (totalDurationMs * 1e6)}
-   *  (CPU-seconds per wall-second = effective CPU parallelism). Same formula as the Flink
-   *  port; divide by allocated cores for a 0–1 utilization. None when duration <= 0. */
-  def avgCpuCoresBusy(cpuNs: Long, totalDurationMs: Long): Option[Double] =
+  // ── Parts handed in by the caller to assemble a RunResult ──────────────────
+  // The job samples each of these at the right moment and passes them to `from`;
+  // keeping them grouped is what lets `from` stay a plain field-by-field copy.
+
+  /** Driver wall-clock timings for one run, in ms. */
+  final case class Timings(loadMs: Long, fitMs: Long, evalMs: Long, totalMs: Long)
+
+  /** Process-level metrics sampled once at the end of a run (from ProcessCpuPlugin). */
+  final case class ProcessMetrics(cpuNanos: Long, maxWorkerHeapBytes: Long, totalHeapBytes: Long)
+
+  /** Dataset workload facts measured during a run. */
+  final case class Workload(
+    dataset:         String,
+    datasetMetadata: Map[String, String],
+    nRows:           Long,
+    nPartitions:     Int,
+    nFeatures:       Option[Int]
+  )
+  object Workload {
+    /** Placeholder for a failed run — only the configured dataset type is known. */
+    def empty(config: RunConfig): Workload =
+      Workload(config.dataset.`type`, Map.empty, nRows = -1L, nPartitions = -1, nFeatures = None)
+  }
+
+  /** Assemble one result row from the parts collected during a run.
+   *
+   *  The single place the output contract is built. Pure — no Spark, no clock or
+   *  metric reads; the caller ([[clustering.benchmark.SparkClusteringJob]]) samples
+   *  everything and hands it here. `status`/`errorMessage` and the (possibly empty)
+   *  `workload`/`eval` are the only difference between an ok and a failed run, so
+   *  there is one builder rather than a factory hierarchy. */
+  def from(
+    config:        RunConfig,
+    framework:     String,
+    profile:       String,
+    startedAtIso:  String,
+    finishedAtIso: String,
+    status:        String,
+    errorMessage:  Option[String],
+    workload:      Workload,
+    timings:       Timings,
+    snap:          ListenerSnapshot,
+    process:       ProcessMetrics,
+    eval:          EvaluationResult
+  ): RunResult = RunResult(
+    runId                    = config.runId,
+    framework                = framework,
+    profile                  = profile,
+    startedAtIso             = startedAtIso,
+    finishedAtIso            = finishedAtIso,
+    status                   = status,
+    errorMessage             = errorMessage,
+    algorithm                = config.algorithm.name,
+    algorithmParams          = stringifyParams(config.algorithm.params),
+    dataset                  = workload.dataset,
+    datasetMetadata          = workload.datasetMetadata,
+    sparkConf                = config.spark_config,
+    experimentMetadata       = config.experimentMetadata,
+    nRows                    = workload.nRows,
+    nPartitions              = workload.nPartitions,
+    nFeatures                = workload.nFeatures,
+    loadDurationMs           = timings.loadMs,
+    fitDurationMs            = timings.fitMs,
+    evalDurationMs           = timings.evalMs,
+    totalDurationMs          = timings.totalMs,
+    shuffleReadBytes         = snap.shuffleReadBytes,
+    shuffleWriteBytes        = snap.shuffleWriteBytes,
+    inputBytes               = snap.inputBytes,
+    outputBytes              = snap.outputBytes,
+    diskBytesSpilled         = snap.diskBytesSpilled,
+    memoryBytesSpilled       = snap.memoryBytesSpilled,
+    jvmGcTimeMs              = snap.jvmGcTimeMs,
+    executorCpuTimeNs        = process.cpuNanos,   // process CPU (Flink-comparable)
+    executorRunTimeMs        = snap.executorRunTimeMs,
+    avgCpuCoresBusy          = avgCpuCoresBusy(process.cpuNanos, timings.totalMs),
+    shuffleFetchWaitTimeMs   = snap.shuffleFetchWaitTimeMs,
+    shuffleWriteTimeNs       = snap.shuffleWriteTimeNs,
+    taskCount                = snap.taskCount,
+    failedTaskCount          = snap.failedTaskCount,
+    stageCount               = snap.stageCount,
+    totalStageMs             = snap.totalStageMs,
+    peakExecutorMemoryBytes  = process.maxWorkerHeapBytes,   // MAX single worker
+    totalExecutorMemoryBytes = process.totalHeapBytes,       // SUM across workers
+    peakOnHeapExecutionBytes = snap.peakOnHeapExecutionBytes,
+    peakOnHeapStorageBytes   = snap.peakOnHeapStorageBytes,
+    peakOnHeapUnifiedBytes   = snap.peakOnHeapUnifiedBytes,
+    nClusters                = eval.nClusters,
+    noiseFraction            = eval.noiseFraction,
+    silhouette               = eval.silhouette,
+    clusterSizes             = eval.clusterSizes.map(_.map { case (k, v) => k.toString -> v })
+  )
+
+  /** Average number of CPU cores busy over the run: `cpuNs / (totalDurationMs * 1e6)`
+   *  (CPU-seconds per wall-second = effective CPU parallelism). Same formula as the
+   *  Flink port; divide by allocated cores for a 0–1 utilization. None when duration <= 0. */
+  private def avgCpuCoresBusy(cpuNs: Long, totalDurationMs: Long): Option[Double] =
     if (totalDurationMs <= 0) None
     else Some(cpuNs / (totalDurationMs.toDouble * 1e6))
+
+  /** json4s JObject -> Map[String, String] for the flat result schema: every param
+   *  value is rendered to its string form. */
+  private def stringifyParams(params: JObject): Map[String, String] =
+    params.obj.map { case (k, v) =>
+      k -> (v match {
+        case JString(s)  => s
+        case JBool(b)    => b.toString
+        case JInt(n)     => n.toString
+        case JLong(n)    => n.toString
+        case JDouble(d)  => d.toString
+        case JDecimal(d) => d.toString
+        case JNull       => "null"
+        case other       => compact(render(other))
+      })
+    }.toMap
 
   /** Render a RunResult as a single-line compact JSON.
    *  Perfect for `pd.read_json(..., lines=True)` in Python/Pandas.
@@ -110,9 +214,10 @@ object RunResult {
     compact(render(Extraction.decompose(r)))
 
   /** Write the result to `<outputDir>/<runId>.json`, creating parents if
-   *  needed. Atomic-ish: write to a tmp sibling then rename, so partial files
-   *  never appear under the final name (matters with array jobs scraping
-   *  results in parallel).
+   *  needed. Write to a tmp sibling then rename, so partial files never appear
+   *  under the final name (matters with array jobs scraping results in
+   *  parallel). The rename is atomic when the filesystem supports it, with a
+   *  REPLACE_EXISTING fallback for those that don't.
    */
   def writeToDir(r: RunResult, outputDir: String): Path = {
     val dir    = Paths.get(outputDir)
@@ -129,85 +234,11 @@ object RunResult {
       StandardOpenOption.WRITE
     )
 
-    Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    try Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE)
+    catch {
+      case _: AtomicMoveNotSupportedException =>
+        Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING)
+    }
     target
   }
-
-  /** Pomocnicza metoda do przepisania pól z ListenerSnapshot na RunResult.
-   *  Wywołuj ją przy budowaniu RunResult po zakończeniu joba:
-   *
-   *  {{{
-   *    val snap = listener.snapshot()
-   *    val result = RunResult(
-   *      ...,
-   *      RunResult.listenerFields(snap): _*   // NIE tak — patrz przykład niżej
-   *    )
-   *  }}}
-   *
-   *  Ponieważ Scala case class nie wspiera spread przy konstruktorze,
-   *  użyj named parameters bezpośrednio:
-   *
-   *  {{{
-   *    val snap = listener.snapshot()
-   *    RunResult(
-   *      runId            = ...,
-   *      // ...inne pola...
-   *      shuffleReadBytes        = snap.shuffleReadBytes,
-   *      shuffleWriteBytes       = snap.shuffleWriteBytes,
-   *      inputBytes              = snap.inputBytes,
-   *      outputBytes             = snap.outputBytes,
-   *      diskBytesSpilled        = snap.diskBytesSpilled,
-   *      memoryBytesSpilled      = snap.memoryBytesSpilled,
-   *      jvmGcTimeMs             = snap.jvmGcTimeMs,
-   *      executorCpuTimeNs       = snap.executorCpuTimeNs,
-   *      executorRunTimeMs       = snap.executorRunTimeMs,
-   *      shuffleFetchWaitTimeMs  = snap.shuffleFetchWaitTimeMs,
-   *      shuffleWriteTimeNs      = snap.shuffleWriteTimeNs,
-   *      taskCount               = snap.taskCount,
-   *      failedTaskCount         = snap.failedTaskCount,
-   *      stageCount              = snap.stageCount,
-   *      totalStageMs            = snap.totalStageMs,
-   *      peakExecutorMemoryBytes = snap.peakExecutorMemoryBytes,
-   *    )
-   *  }}}
-   */
-  def fromSnapshot(snap: BenchmarkListener.ListenerSnapshot): ListenerFields =
-    ListenerFields(
-      shuffleReadBytes        = snap.shuffleReadBytes,
-      shuffleWriteBytes       = snap.shuffleWriteBytes,
-      inputBytes              = snap.inputBytes,
-      outputBytes             = snap.outputBytes,
-      diskBytesSpilled        = snap.diskBytesSpilled,
-      memoryBytesSpilled      = snap.memoryBytesSpilled,
-      jvmGcTimeMs             = snap.jvmGcTimeMs,
-      executorCpuTimeNs       = snap.executorCpuTimeNs,
-      executorRunTimeMs       = snap.executorRunTimeMs,
-      shuffleFetchWaitTimeMs  = snap.shuffleFetchWaitTimeMs,
-      shuffleWriteTimeNs      = snap.shuffleWriteTimeNs,
-      taskCount               = snap.taskCount,
-      failedTaskCount         = snap.failedTaskCount,
-      stageCount              = snap.stageCount,
-      totalStageMs            = snap.totalStageMs,
-    )
-
-  /** Pośrednia struktura ułatwiająca przekazanie pól listenera do RunResult
-   *  bez powtarzania wszystkich 16 nazw w każdym miejscu gdzie budujesz wynik.
-   */
-  final case class ListenerFields(
-    shuffleReadBytes:        Long,
-    shuffleWriteBytes:       Long,
-    inputBytes:              Long,
-    outputBytes:             Long,
-    diskBytesSpilled:        Long,
-    memoryBytesSpilled:      Long,
-    jvmGcTimeMs:             Long,
-    executorCpuTimeNs:       Long,
-    executorRunTimeMs:       Long,
-    shuffleFetchWaitTimeMs:  Long,
-    shuffleWriteTimeNs:      Long,
-    taskCount:               Long,
-    failedTaskCount:         Long,
-    stageCount:              Long,
-    totalStageMs:            Long,
-  )
 }

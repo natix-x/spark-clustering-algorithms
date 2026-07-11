@@ -3,141 +3,115 @@ package clustering.benchmark.registry
 import clustering.algorithms.dbscan.{DBSCAN, GridDBSCAN}
 import clustering.algorithms.kmeans.KMeans
 import clustering.algorithms.kmedoids.{CLARA, DistributedFastPAM, FastPAM, PAM}
-import clustering.benchmark.config.AlgorithmSpec
+import clustering.benchmark.config.{AlgorithmSpec, Params}
 import clustering.core.Clusterer
-import clustering.distance.{DistanceMetric, EuclideanDistance}
+import clustering.distance.DistanceMetric
 import org.json4s._
 
 object AlgorithmRegistry {
 
-  private implicit val formats: Formats = DefaultFormats
+  /** A built clusterer together with the distance metric it was configured with.
+   *  Returned by [[create]] so evaluation reuses the exact same metric instead of
+   *  re-parsing the config a second time. */
+  final case class Built(clusterer: Clusterer, distance: DistanceMetric)
 
-  trait AlgorithmFactory {
+  private trait AlgorithmFactory {
     def name: String
-    def create(params: JObject): Clusterer
+    /** `distance` is resolved once by [[create]] (shared across all algorithms)
+     *  and injected here, so no factory re-parses or forgets it. */
+    def create(params: Params, distance: DistanceMetric): Clusterer
   }
 
-  private val factories: Map[String, AlgorithmFactory] = Seq(
-    KMeansFactory, PAMFactory, FastPAMFactory, DistributedFastPAMFactory, CLARAFactory,
-    DBSCANFactory, GridDBSCANFactory
-  ).map(f => f.name -> f).toMap
+  private val registry: NamedRegistry[AlgorithmFactory] =
+    NamedRegistry("algorithm", Seq(
+      KMeansFactory, PAMFactory, FastPAMFactory, DistributedFastPAMFactory, CLARAFactory,
+      DBSCANFactory, GridDBSCANFactory
+    ).map(f => f.name -> f))
 
-  val known: Set[String] = factories.keySet
+  /** Resolves the distance once and builds the clusterer with it, returning both
+   *  so the caller need not re-parse the config to evaluate with the same metric. */
+  def create(spec: AlgorithmSpec): Built = {
+    val distance = distanceFrom(spec.params)
+    Built(registry.get(spec.name).create(Params(spec.params), distance), distance)
+  }
 
-  def create(spec: AlgorithmSpec): Clusterer =
-    factories.get(spec.name.toLowerCase) match {
-      case Some(f) => f.create(spec.params)
-      case None =>
-        throw new IllegalArgumentException(
-          s"Unknown algorithm: '${spec.name}'. Known: ${factories.keys.toSeq.sorted.mkString(", ")}"
-        )
-    }
-
-  // --- helpers shared across factories -------------------------------------
-
-  private def distanceFrom(params: JObject, default: DistanceMetric = EuclideanDistance): DistanceMetric =
+  /** Parses the required `distance` param. No default — every run must state its
+   *  distance explicitly so benchmark results are unambiguous. */
+  private def distanceFrom(params: JObject): DistanceMetric =
     (params \ "distance") match {
       case JString(name) => DistanceRegistry.get(name)
-      case JNothing      => default
+      case JNothing      => throw new IllegalArgumentException(
+        s"Missing required 'distance' parameter. Known: ${DistanceRegistry.knownNames.mkString(", ")}"
+      )
       case other         => throw new IllegalArgumentException(s"distance must be a string, got: $other")
-    }
-
-  private def intParam(params: JObject, key: String): Int =
-    (params \ key) match {
-      case JNothing => throw new IllegalArgumentException(s"Missing required Int parameter: '$key'")
-      case v        => v.extract[Int]
-    }
-
-  private def intParamOpt(params: JObject, key: String, default: Int): Int =
-    (params \ key) match {
-      case JNothing => default
-      case v        => v.extract[Int]
-    }
-
-  private def doubleParam(params: JObject, key: String): Double =
-    (params \ key) match {
-      case JNothing => throw new IllegalArgumentException(s"Missing required Double parameter: '$key'")
-      case v        => v.extract[Double]
-    }
-
-  private def doubleParamOpt(params: JObject, key: String, default: Double): Double =
-    (params \ key) match {
-      case JNothing => default
-      case v        => v.extract[Double]
-    }
-
-  private def longParamOpt(params: JObject, key: String, default: Long): Long =
-    (params \ key) match {
-      case JNothing => default
-      case v        => v.extract[Long]
     }
 
   // --- factories -----------------------------------------------------------
 
   private object KMeansFactory extends AlgorithmFactory {
     val name = "kmeans"
-    def create(params: JObject): Clusterer = new KMeans(
-      k        = intParam(params, "k"),
-      maxIter  = intParamOpt(params, "maxIter", 100),
-      eps      = doubleParamOpt(params, "eps", 1e-4),
-      distance = distanceFrom(params),
-      seed     = longParamOpt(params, "seed", 42L)
+    def create(p: Params, distance: DistanceMetric): Clusterer = new KMeans(
+      k        = p.int("k"),
+      maxIter  = p.intOpt("maxIter", 100),
+      eps      = p.doubleOpt("eps", 1e-4),
+      distance = distance,
+      seed     = p.longOpt("seed", 42L)
     )
   }
 
   private object PAMFactory extends AlgorithmFactory {
     val name = "pam"
-    def create(params: JObject): Clusterer = new PAM(
-      k        = intParam(params, "k"),
-      maxIter  = intParamOpt(params, "maxIter", 100),
-      distance = distanceFrom(params)
+    def create(p: Params, distance: DistanceMetric): Clusterer = new PAM(
+      k        = p.int("k"),
+      maxIter  = p.intOpt("maxIter", 100),
+      distance = distance
     )
   }
 
   private object FastPAMFactory extends AlgorithmFactory {
     val name = "fastpam"
-    def create(params: JObject): Clusterer = new FastPAM(
-      k        = intParam(params, "k"),
-      maxIter  = intParamOpt(params, "maxIter", 100),
-      distance = distanceFrom(params)
+    def create(p: Params, distance: DistanceMetric): Clusterer = new FastPAM(
+      k        = p.int("k"),
+      maxIter  = p.intOpt("maxIter", 100),
+      distance = distance
     )
   }
 
   private object DistributedFastPAMFactory extends AlgorithmFactory {
     val name = "distfastpam"
-    def create(params: JObject): Clusterer = new DistributedFastPAM(
-      k        = intParam(params, "k"),
-      maxIter  = intParamOpt(params, "maxIter", 100),
-      distance = distanceFrom(params)
+    def create(p: Params, distance: DistanceMetric): Clusterer = new DistributedFastPAM(
+      k        = p.int("k"),
+      maxIter  = p.intOpt("maxIter", 100),
+      distance = distance
     )
   }
 
   private object CLARAFactory extends AlgorithmFactory {
     val name = "clara"
-    def create(params: JObject): Clusterer = new CLARA(
-      k          = intParam(params, "k"),
-      numSamples = intParamOpt(params, "numSamples", 5),
-      sampleSize = intParamOpt(params, "sampleSize", 1000),
-      maxIter    = intParamOpt(params, "maxIter", 100),
-      distance   = distanceFrom(params)
+    def create(p: Params, distance: DistanceMetric): Clusterer = new CLARA(
+      k          = p.int("k"),
+      numSamples = p.intOpt("numSamples", 5),
+      sampleSize = p.intOpt("sampleSize", 1000),
+      maxIter    = p.intOpt("maxIter", 100),
+      distance   = distance
     )
   }
 
   private object DBSCANFactory extends AlgorithmFactory {
     val name = "dbscan"
-    def create(params: JObject): Clusterer = new DBSCAN(
-      eps      = doubleParam(params, "eps"),
-      minPts   = intParam(params, "minPts"),
-      distance = distanceFrom(params)
+    def create(p: Params, distance: DistanceMetric): Clusterer = new DBSCAN(
+      eps      = p.double("eps"),
+      minPts   = p.int("minPts"),
+      distance = distance
     )
   }
 
   private object GridDBSCANFactory extends AlgorithmFactory {
     val name = "griddbscan"
-    def create(params: JObject): Clusterer = new GridDBSCAN(
-      eps      = doubleParam(params, "eps"),
-      minPts   = intParam(params, "minPts"),
-      distance = distanceFrom(params)
+    def create(p: Params, distance: DistanceMetric): Clusterer = new GridDBSCAN(
+      eps      = p.double("eps"),
+      minPts   = p.int("minPts"),
+      distance = distance
     )
   }
 }

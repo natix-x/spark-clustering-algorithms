@@ -12,12 +12,13 @@ import java.nio.file.{Files, Paths}
  *  needs without a god-class case-class hierarchy.
  *
  *  @param runId       Globally unique id; becomes the result filename stem.
- *  @param profile     Cluster profile name ("local" | "ares"); env overrides if absent.
+ *  @param profile     Cluster profile name ("local" | "ares"); defaults to "local" if absent.
  *  @param dataset     DataSource spec (type + params).
  *  @param algorithm   Algorithm spec (name + params).
  *  @param evaluation  Which metrics to compute, optionally subsampled.
- *  @param sparkConf   Extra SparkConf entries set programmatically before session start.
- *  @param outputDir   Overrides profile.outputDir when present.
+ *  @param spark_config Extra SparkConf entries set programmatically before session start.
+ *                     Snake_case to match the input contract key (see run_config.schema.json).
+ *  @param outputDir   Where to write the result; a local-dev default is used if absent.
  *  @param experimentMetadata Freeform key→value pairs describing the experiment
  *                     setup (nodes, cores, memory, walltime, ...); written verbatim
  *                     into the result JSON for analysis.
@@ -28,7 +29,7 @@ final case class RunConfig(
   dataset: DataSourceSpec,
   algorithm: AlgorithmSpec,
   evaluation: EvaluationSpec,
-  sparkConf: Map[String, String] = Map.empty,
+  spark_config: Map[String, String] = Map.empty,
   outputDir: Option[String] = None,
   experimentMetadata: Map[String, String] = Map.empty
 )
@@ -37,14 +38,8 @@ final case class DataSourceSpec(`type`: String, params: JObject)
 
 final case class AlgorithmSpec(name: String, params: JObject)
 
-/** What to evaluate after the model is fit.
- *
- *  @param metrics    Subset of {"silhouette", "clusterSizes", "noiseFraction"}.
- *  @param sampleSize Optional cap for O(n^2) metrics like silhouette;
- *                    None = run on full dataset (only feasible for small data).
- */
 final case class EvaluationSpec(
-  metrics: Seq[String] = Seq("silhouette", "clusterSizes", "noiseFraction"),
+  metrics: Seq[String] = Seq("silhouette", "nClusters", "clusterSizes", "noiseFraction"),
   sampleSize: Option[Int] = None,
   seed: Long = 42L
 )
@@ -53,18 +48,15 @@ object RunConfig {
 
   private implicit val formats: Formats = DefaultFormats
 
-  def fromJsonString(json: String): RunConfig = parse(json).extract[RunConfig]
+  def fromFile(path: String): RunConfig =
+    parse(Files.readString(Paths.get(path))).extract[RunConfig]
 
-  def fromFile(path: String): RunConfig = {
-    val bytes = Files.readAllBytes(Paths.get(path))
-    fromJsonString(new String(bytes, "UTF-8"))
-  }
-
-  /** Resolve the effective profile: explicit field beats env auto-detection. */
   def resolveProfile(cfg: RunConfig): ClusterProfile =
-    cfg.profile.map(ClusterProfile.fromName).getOrElse(ClusterProfile.fromEnv())
+    cfg.profile.map(ClusterProfile.fromName).getOrElse(LocalProfile)
 
-  /** Resolve effective output directory: per-run override beats profile default. */
-  def resolveOutputDir(cfg: RunConfig, profile: ClusterProfile): String =
-    cfg.outputDir.getOrElse(profile.outputDir)
+  private val DefaultOutputDir: String =
+    sys.props.getOrElse("user.dir", ".") + "/benchmark-results"
+
+  def resolveOutputDir(cfg: RunConfig): String =
+    cfg.outputDir.getOrElse(DefaultOutputDir)
 }

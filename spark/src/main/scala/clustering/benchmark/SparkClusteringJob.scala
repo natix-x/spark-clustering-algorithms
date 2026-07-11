@@ -1,36 +1,37 @@
-package clustering.benchmark.framework
+package clustering.benchmark
 
 import clustering.benchmark.config.{ClusterProfile, RunConfig}
 import clustering.benchmark.datasource.DataSource
-import clustering.benchmark.evaluation.EvaluationRunner
-import clustering.benchmark.metrics.BenchmarkListener.ListenerSnapshot
+import clustering.benchmark.evaluation.{EvaluationResult, EvaluationRunner}
 import clustering.benchmark.metrics.{BenchmarkListener, ProcessCpuPlugin, RunResult}
-import clustering.benchmark.registry.{AlgorithmRegistry, DistanceRegistry}
-import clustering.core.Clusterer
-import clustering.distance.{DistanceMetric, EuclideanDistance}
+import clustering.benchmark.registry.{AlgorithmRegistry, DataSourceRegistry}
+import clustering.core.{Clusterer, Columns}
 import org.apache.spark.SparkConf
 import org.apache.spark.ml.linalg.Vector
 import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.json4s._
+import org.apache.spark.storage.StorageLevel
 import org.log4s.getLogger
 
+import java.io.File
 import java.time.Instant
+import scala.util.control.NonFatal
+import scala.util.{Failure, Success, Try}
 
-/** Spark-backed implementation of `ClusteringJob`.
+/** Runs one benchmark on Spark.
  *
  *  Pipeline: build SparkSession → install listener → load → fit → evaluate
  *  → assemble RunResult. The listener captures execution-level metrics
  *  (shuffle, GC, peak exec memory), wall-clock timings come from
  *  driver-side `System.nanoTime` around each phase.
  */
-final class SparkClusteringJob extends ClusteringJob {
+final class SparkClusteringJob {
   private val logger = getLogger
 
-  override val framework: String = "spark"
+  val framework: String = "spark"
 
-  override def run(config: RunConfig, profile: ClusterProfile): RunResult = {
+  def run(config: RunConfig, profile: ClusterProfile): RunResult = {
     val startedAt = Instant.now()
-    val t0Total   = System.nanoTime()
+    val runStart  = System.nanoTime()
 
     logger.info(s"starting runId=${config.runId} algorithm=${config.algorithm.name} " +
       s"dataset=${config.dataset.`type`} profile=${profile.name}")
@@ -40,109 +41,115 @@ final class SparkClusteringJob extends ClusteringJob {
     sc.setLogLevel("WARN")
 
     // GraphFrames' connected-components (used by DBSCAN) checkpoints its
-    // iterations, so a checkpoint dir must be set before fit.
-    sc.setCheckpointDir(s"${System.getProperty("java.io.tmpdir")}/spark-checkpoints-${config.runId}")
+    // iterations, so a checkpoint dir must be set before fit. Deleted below so
+    // array-job matrices don't fill tmp with stale checkpoints.
+    val checkpointDir = s"${System.getProperty("java.io.tmpdir")}/spark-checkpoints-${config.runId}"
+    sc.setCheckpointDir(checkpointDir)
 
     val listener = new BenchmarkListener
     sc.addSparkListener(listener)
     ProcessCpuPlugin.reset()  // clear process-CPU accumulator before this run
 
-    try {
-      val datasource: DataSource = DataSource.create(config.dataset)
-      val clusterer: Clusterer   = AlgorithmRegistry.create(config.algorithm)
-      val evalDistance           = evaluationDistance(config)
+    // Run all Spark-dependent work; Try captures a NonFatal failure as a value,
+    // so no mutable success/failure flags. Timings are driver-side wall clock,
+    // independent of the listener bus.
+    val outcome = Try(execute(spark, config))
+    val totalMs = elapsedMs(runStart, System.nanoTime())   // measured before stop(), like each phase
 
-      // --- load ---------------------------------------------------------
-      logger.info(s"loading dataset ${datasource.name}")
-      val t0Load      = System.nanoTime()
-      val data        = datasource.load(spark)
+    // Assemble the RunResult only AFTER spark.stop(): SparkContext.stop()
+    // synchronously drains the async listener bus, so reading listener/plugin
+    // metrics before it would undercount tail events (tasks, stages).
+    spark.stop()
+    deleteRecursively(new File(checkpointDir))
+    logger.info(s"runId=${config.runId} total=${totalMs}ms")
 
-      // inferDim before count() so dim inference doesn't add to load time
-      val nFeatures   = inferDim(data)
-      val nRows       = data.count()
-      val nPartitions = data.rdd.getNumPartitions
-      val t1Load      = System.nanoTime()
-      logger.info(s"loaded nRows=$nRows nPartitions=$nPartitions nFeatures=${nFeatures.getOrElse("?")} " +
-        s"in ${ms(t0Load, t1Load)}ms")
+    val snap          = listener.snapshot()
+    val process       = readProcessMetrics()
+    val finishedAtIso = Instant.now().toString
 
-      // --- fit ----------------------------------------------------------
-      logger.info(s"fitting ${config.algorithm.name}")
-      val t0Fit  = System.nanoTime()
-      val model  = clusterer.fit(data)
-      val t1Fit  = System.nanoTime()
-      logger.info(s"fitted ${config.algorithm.name} in ${ms(t0Fit, t1Fit)}ms")
-
-      // --- evaluate -----------------------------------------------------
-      logger.info(s"evaluating (metrics=${config.evaluation.metrics.mkString(",")} " +
-        s"sampleSize=${config.evaluation.sampleSize.getOrElse("full")})")
-      val t0Eval = System.nanoTime()
-      val eval   = new EvaluationRunner(evalDistance)
-        .run(model, data, config.evaluation, knownTotalRows = Some(nRows))
-      val t1Eval = System.nanoTime()
-      logger.info(s"evaluated nClusters=${eval.nClusters} " +
-        s"silhouette=${eval.silhouette.map(s => f"$s%.4f").getOrElse("n/a")} " +
-        s"noiseFraction=${f"${eval.noiseFraction}%.4f"} in ${ms(t0Eval, t1Eval)}ms")
-
-      val finishedAt = Instant.now()
-      val snap       = listener.snapshot()
-
-      RunResult(
-        runId                   = config.runId,
-        framework               = framework,
-        profile                 = profile.name,
-        startedAtIso            = startedAt.toString,
-        finishedAtIso           = finishedAt.toString,
-        status                  = "ok",
-        errorMessage            = None,
-        algorithm               = config.algorithm.name,
-        algorithmParams         = flatten(config.algorithm.params),
-        dataset                 = datasource.name,
-        datasetMetadata         = datasource.metadata,
-        sparkConf               = config.sparkConf,
-        experimentMetadata      = config.experimentMetadata,
-        nRows                   = nRows,
-        nPartitions             = nPartitions,
-        nFeatures               = nFeatures,
-        loadDurationMs          = ms(t0Load, t1Load),
-        fitDurationMs           = ms(t0Fit, t1Fit),
-        evalDurationMs          = ms(t0Eval, t1Eval),
-        totalDurationMs         = ms(t0Total, System.nanoTime()),
-        shuffleReadBytes        = snap.shuffleReadBytes,
-        shuffleWriteBytes       = snap.shuffleWriteBytes,
-        inputBytes              = snap.inputBytes,
-        outputBytes             = snap.outputBytes,
-        diskBytesSpilled        = snap.diskBytesSpilled,
-        memoryBytesSpilled      = snap.memoryBytesSpilled,
-        jvmGcTimeMs             = snap.jvmGcTimeMs,
-        executorCpuTimeNs       = ProcessCpuPlugin.totalCpuNanos(),  // process CPU (Flink-comparable)
-        executorRunTimeMs       = snap.executorRunTimeMs,
-        avgCpuCoresBusy         = RunResult.avgCpuCoresBusy(
-                                    ProcessCpuPlugin.totalCpuNanos(), ms(t0Total, System.nanoTime())),
-        shuffleFetchWaitTimeMs  = snap.shuffleFetchWaitTimeMs,
-        shuffleWriteTimeNs      = snap.shuffleWriteTimeNs,
-        taskCount               = snap.taskCount,
-        failedTaskCount         = snap.failedTaskCount,
-        stageCount               = snap.stageCount,
-        totalStageMs            = snap.totalStageMs,
-        peakExecutorMemoryBytes = ProcessCpuPlugin.maxWorkerHeapBytes(),  // MAX single worker
-        totalExecutorMemoryBytes = ProcessCpuPlugin.totalHeapBytes(),     // SUM across workers
-        peakOnHeapExecutionBytes = snap.peakOnHeapExecutionBytes,
-        peakOnHeapStorageBytes   = snap.peakOnHeapStorageBytes,
-        peakOnHeapUnifiedBytes   = snap.peakOnHeapUnifiedBytes,
-        nClusters               = eval.nClusters,
-        noiseFraction           = eval.noiseFraction,
-        silhouette              = eval.silhouette,
-        clusterSizes            = eval.clusterSizes.map { case (k, v) => k.toString -> v }
-      )
-    } catch {
-      case t: Throwable =>
+    outcome match {
+      case Success(e) =>
+        RunResult.from(
+          config, framework, profile.name,
+          startedAtIso  = startedAt.toString,
+          finishedAtIso = finishedAtIso,
+          status        = "ok",
+          errorMessage  = None,
+          workload      = e.workload,
+          timings       = e.timings.copy(totalMs = totalMs),
+          snap          = snap,
+          process       = process,
+          eval          = e.eval
+        )
+      case Failure(t) =>
         logger.error(t)(s"run failed: ${t.getClass.getSimpleName}: ${t.getMessage}")
-        val snap = listener.snapshot()
-        failedResult(config, profile, startedAt, t0Total, snap, t)
-    } finally {
-      spark.stop()
-      logger.info(s"runId=${config.runId} total=${ms(t0Total, System.nanoTime())}ms")
+        RunResult.from(
+          config, framework, profile.name,
+          startedAtIso  = startedAt.toString,
+          finishedAtIso = finishedAtIso,
+          status        = "failed",
+          errorMessage  = Some(s"${t.getClass.getSimpleName}: ${t.getMessage}"),
+          workload      = RunResult.Workload.empty(config),
+          timings       = RunResult.Timings(0L, 0L, 0L, totalMs),
+          snap          = snap,
+          process       = process,
+          eval          = EvaluationResult.empty
+        )
     }
+  }
+
+  /** Load → fit → evaluate, returning an immutable [[SparkClusteringJob.ExecutionResult]].
+   *  Owns nothing beyond the phases; `run` wraps this in a Try and controls the
+   *  session lifecycle + metric reads. `totalMs` is left 0 here — it spans the
+   *  whole session and is filled in by `run`. */
+  private def execute(spark: SparkSession, config: RunConfig): SparkClusteringJob.ExecutionResult = {
+    val datasource: DataSource = DataSourceRegistry.create(config.dataset)
+    val built                  = AlgorithmRegistry.create(config.algorithm)
+    val clusterer: Clusterer   = built.clusterer
+    val evalDistance           = built.distance   // same metric the algorithm was built with
+
+    logger.info(s"loading dataset ${datasource.name}")
+    val loadStart   = System.nanoTime()
+    val data        = datasource.load(spark).persist(StorageLevel.MEMORY_AND_DISK)
+    val nRows       = data.count()   // materialises the cache
+    val loadEnd     = System.nanoTime()
+
+    // After the timing window: cache is warm, so take(1)/getNumPartitions add
+    // negligible cost and don't inflate loadMs.
+    val nFeatures   = inferFeatureCount(data)
+    val nPartitions = data.rdd.getNumPartitions
+    logger.info(s"loaded nRows=$nRows nPartitions=$nPartitions nFeatures=${nFeatures.getOrElse("?")} " +
+      s"in ${elapsedMs(loadStart, loadEnd)}ms")
+
+    logger.info(s"fitting ${config.algorithm.name}")
+    val fitStart = System.nanoTime()
+    val model    = clusterer.fit(data)
+    val fitEnd   = System.nanoTime()
+    logger.info(s"fitted ${config.algorithm.name} in ${elapsedMs(fitStart, fitEnd)}ms")
+
+    logger.info(s"evaluating (metrics=${config.evaluation.metrics.mkString(",")} " +
+      s"sampleSize=${config.evaluation.sampleSize.getOrElse("full")})")
+    val evalStart = System.nanoTime()
+    val eval      = new EvaluationRunner(evalDistance)
+      .run(model, data, config.evaluation, knownTotalRows = Some(nRows))
+    val evalEnd   = System.nanoTime()
+    logger.info(s"evaluated nClusters=${eval.nClusters.getOrElse("n/a")} " +
+      s"silhouette=${eval.silhouette.map(s => f"$s%.4f").getOrElse("n/a")} " +
+      s"noiseFraction=${eval.noiseFraction.map(v => f"$v%.4f").getOrElse("n/a")} in ${elapsedMs(evalStart, evalEnd)}ms")
+
+    data.unpersist(blocking = true)   // sync: free blocks before reading memory metrics
+
+    SparkClusteringJob.ExecutionResult(
+      workload = RunResult.Workload(
+        dataset = datasource.name, datasetMetadata = datasource.metadata,
+        nRows = nRows, nPartitions = nPartitions, nFeatures = nFeatures),
+      eval    = eval,
+      timings = RunResult.Timings(
+        loadMs  = elapsedMs(loadStart, loadEnd),
+        fitMs   = elapsedMs(fitStart, fitEnd),
+        evalMs  = elapsedMs(evalStart, evalEnd),
+        totalMs = 0L)
+    )
   }
 
   /** Spark configs that improve the fidelity of metrics arriving in our
@@ -161,93 +168,44 @@ final class SparkClusteringJob extends ClusteringJob {
     val conf = new SparkConf().setAppName(s"benchmark-${config.runId}")
     profile.sparkMaster.foreach(conf.setMaster)
     MetricsConfDefaults.foreach { case (k, v) => conf.set(k, v) }
-    config.sparkConf.foreach    { case (k, v) => conf.set(k, v) }
+    config.spark_config.foreach { case (k, v) => conf.set(k, v) }
     SparkSession.builder().config(conf).getOrCreate()
   }
 
-  private def evaluationDistance(config: RunConfig): DistanceMetric =
-    (config.algorithm.params \ "distance") match {
-      case JString(name) => DistanceRegistry.get(name)
-      case _             => EuclideanDistance
-    }
-
-  /** Infers dimension from a sample of one row — cheap, doesn't force the
-   *  whole pipeline to materialize. */
-  private def inferDim(df: DataFrame): Option[Int] = {
+  /** Infers the feature-vector dimensionality from a sample of one row — cheap,
+   *  doesn't force the whole pipeline to materialize. */
+  private def inferFeatureCount(df: DataFrame): Option[Int] = {
     val sample = df.take(1)
-    if (sample.isEmpty) None else Some(sample.head.getAs[Vector]("features").size)
+    if (sample.isEmpty) None else Some(sample.head.getAs[Vector](Columns.Features).size)
   }
 
-  private def ms(start: Long, end: Long): Long = (end - start) / 1000000L
+  /** Milliseconds between two `System.nanoTime` readings. */
+  private def elapsedMs(startNanos: Long, endNanos: Long): Long = (endNanos - startNanos) / 1000000L
 
-  /** json4s JObject -> Map[String, String] for the flat result schema. */
-  private def flatten(params: JObject): Map[String, String] = {
-    params.obj.map { case (k, v) =>
-      k -> (v match {
-        case JString(s)   => s
-        case JBool(b)     => b.toString
-        case JInt(n)      => n.toString
-        case JLong(n)     => n.toString
-        case JDouble(d)   => d.toString
-        case JDecimal(d)  => d.toString
-        case JNull        => "null"
-        case other        => org.json4s.jackson.JsonMethods.compact(org.json4s.jackson.JsonMethods.render(other))
-      })
-    }.toMap
+  /** Best-effort recursive delete of the run's checkpoint dir. */
+  private def deleteRecursively(f: File): Unit = {
+    try {
+      if (f.isDirectory) Option(f.listFiles()).foreach(_.foreach(deleteRecursively))
+      f.delete()
+    } catch { case NonFatal(e) => logger.warn(s"could not delete ${f.getPath}: ${e.getMessage}") }
   }
 
-  private def failedResult(
-    config:    RunConfig,
-    profile:   ClusterProfile,
-    startedAt: Instant,
-    t0Total:   Long,
-    snap:      ListenerSnapshot,
-    error:     Throwable
-  ): RunResult = RunResult(
-    runId                   = config.runId,
-    framework               = framework,
-    profile                 = profile.name,
-    startedAtIso            = startedAt.toString,
-    finishedAtIso           = Instant.now().toString,
-    status                  = "failed",
-    errorMessage            = Some(s"${error.getClass.getSimpleName}: ${error.getMessage}"),
-    algorithm               = config.algorithm.name,
-    algorithmParams         = flatten(config.algorithm.params),
-    dataset                 = config.dataset.`type`,
-    datasetMetadata         = Map.empty,
-    sparkConf               = config.sparkConf,
-    experimentMetadata      = config.experimentMetadata,
-    nRows                   = -1L,
-    nPartitions             = -1,
-    nFeatures               = None,
-    loadDurationMs          = 0L,
-    fitDurationMs           = 0L,
-    evalDurationMs          = 0L,
-    totalDurationMs         = ms(t0Total, System.nanoTime()),
-    shuffleReadBytes        = snap.shuffleReadBytes,
-    shuffleWriteBytes       = snap.shuffleWriteBytes,
-    inputBytes              = snap.inputBytes,
-    outputBytes             = snap.outputBytes,
-    diskBytesSpilled        = snap.diskBytesSpilled,
-    memoryBytesSpilled      = snap.memoryBytesSpilled,
-    jvmGcTimeMs             = snap.jvmGcTimeMs,
-    executorCpuTimeNs       = ProcessCpuPlugin.totalCpuNanos(),  // process CPU (Flink-comparable)
-    executorRunTimeMs       = snap.executorRunTimeMs,
-    avgCpuCoresBusy         = None,  // run failed before timing
-    shuffleFetchWaitTimeMs  = snap.shuffleFetchWaitTimeMs,
-    shuffleWriteTimeNs      = snap.shuffleWriteTimeNs,
-    taskCount               = snap.taskCount,
-    failedTaskCount         = snap.failedTaskCount,
-    stageCount              = snap.stageCount,
-    totalStageMs            = snap.totalStageMs,
-    peakExecutorMemoryBytes = ProcessCpuPlugin.maxWorkerHeapBytes(),  // MAX single worker
-    totalExecutorMemoryBytes = ProcessCpuPlugin.totalHeapBytes(),     // SUM across workers
-    peakOnHeapExecutionBytes = snap.peakOnHeapExecutionBytes,
-    peakOnHeapStorageBytes   = snap.peakOnHeapStorageBytes,
-    peakOnHeapUnifiedBytes   = snap.peakOnHeapUnifiedBytes,
-    nClusters               = 0,
-    noiseFraction           = 0.0,
-    silhouette              = None,
-    clusterSizes            = Map.empty
+  /** Read the process-level metrics once (CPU + heap), for the RunResult. */
+  private def readProcessMetrics(): RunResult.ProcessMetrics =
+    RunResult.ProcessMetrics(
+      cpuNanos           = ProcessCpuPlugin.totalCpuNanos(),
+      maxWorkerHeapBytes = ProcessCpuPlugin.maxWorkerHeapBytes(),
+      totalHeapBytes     = ProcessCpuPlugin.totalHeapBytes())
+}
+
+object SparkClusteringJob {
+
+  /** Immutable output of the load→fit→evaluate phases, carried past `spark.stop()`
+   *  so the final RunResult can be assembled once listener metrics are complete.
+   *  `timings.totalMs` is filled by `run` (spans the whole session). */
+  private final case class ExecutionResult(
+    workload: RunResult.Workload,
+    eval:     EvaluationResult,
+    timings:  RunResult.Timings
   )
 }

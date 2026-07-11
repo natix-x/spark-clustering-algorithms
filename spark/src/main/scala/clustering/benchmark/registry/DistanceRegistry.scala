@@ -4,16 +4,15 @@ import clustering.distance.{CosineDistance, DistanceMetric, EuclideanDistance, M
 
 object DistanceRegistry {
 
-  private val metrics: Map[String, DistanceMetric] = Map(
-    "euclidean" -> EuclideanDistance,
-    "manhattan" -> ManhattanDistance,
-    "cosine"    -> CosineDistance
-  )
-
-  val known: Set[String] = metrics.keySet
-
-  def get(name: String): DistanceMetric =
-    metrics.getOrElse(name.toLowerCase, throw new IllegalArgumentException(
-      s"Unknown distance metric: '$name'. Known: ${known.toSeq.sorted.mkString(", ")}"
+  private val registry: NamedRegistry[DistanceMetric] =
+    NamedRegistry("distance metric", Seq(
+      "euclidean" -> EuclideanDistance,
+      "manhattan" -> ManhattanDistance,
+      "cosine"    -> CosineDistance
     ))
+
+  /** Sorted list of registered metric names, for error messages. */
+  def knownNames: Seq[String] = registry.knownNames
+
+  def get(name: String): DistanceMetric = registry.get(name)
 }
