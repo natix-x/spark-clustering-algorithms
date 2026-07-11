@@ -7,15 +7,6 @@ import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.functions._
 
 
-/** Computes the mean silhouette score over all non-noise points.
- *
- *  s(p) = (b - a) / max(a, b)
- *  where a = mean intra-cluster distance, b = mean nearest-cluster distance.
- *  Score in [-1, 1]; higher is better.
- *
- *  Noise points (label -1, as produced by DBSCAN) are excluded. The score is
- *  O(n²); the caller is expected to sample the data down beforehand.
- */
 class SilhouetteEvaluator(
                            val distance: DistanceMetric = EuclideanDistance
                          ) extends ClusteringEvaluator {
@@ -23,7 +14,7 @@ class SilhouetteEvaluator(
   override def evaluate(model: Model, data: DataFrame): Double = {
     val spark = data.sparkSession
 
-    val labeled = model.labeledData(data)
+    val labeled = model.assignClusters(data)
       .filter(col("prediction") =!= -1)
       .select(col("prediction"), col("features"))
       .cache()

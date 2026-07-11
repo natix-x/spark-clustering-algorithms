@@ -13,7 +13,7 @@ object CosineDistance extends DistanceMetric {
     val normB = magnitude(y)
 
     if (normA == 0.0 || normB == 0.0) {
-      1.0 // maksymalna odległość (brak kierunku)
+      1.0
     } else {
       1.0 - (dot / (normA * normB))
     }
