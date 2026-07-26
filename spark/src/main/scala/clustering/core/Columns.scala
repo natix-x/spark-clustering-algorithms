@@ -9,4 +9,7 @@ package clustering.core
 object Columns {
   val Features   = "features"
   val Prediction = "prediction"
+
+  /** Optional point weight; absent means every point weighs 1.0. See [[Weights]]. */
+  val Weight     = "weight"
 }

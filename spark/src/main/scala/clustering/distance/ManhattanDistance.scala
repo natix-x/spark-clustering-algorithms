@@ -2,7 +2,7 @@ package clustering.distance
 
 import org.apache.spark.ml.linalg.Vector
 
-
+// TODO: make it more performant if possible
 object ManhattanDistance extends DistanceMetric {
 
   override def compute(a: Vector, b: Vector): Double = {
