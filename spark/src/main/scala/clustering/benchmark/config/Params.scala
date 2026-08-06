@@ -25,6 +25,12 @@ final class Params(json: JObject) {
     case other      => throw new IllegalArgumentException(s"Param '$key' must be a string, got: $other")
   }
 
+  def stringOpt(key: String, default: String): String = opt(key) match {
+    case None => default
+    case Some(JString(s))  => s
+    case Some(other)  => throw new IllegalArgumentException(s"Param '$key' must be a string, got: $other")
+  }
+
   /** Present, non-null value for `key`, else None. */
   def opt(key: String): Option[JValue] = (json \ key) match {
     case JNothing | JNull => None
