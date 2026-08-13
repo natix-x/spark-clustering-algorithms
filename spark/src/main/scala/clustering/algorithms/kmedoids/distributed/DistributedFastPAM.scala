@@ -1,5 +1,7 @@
-package clustering.algorithms.kmedoids
+package clustering.algorithms.kmedoids.distributed
 
+import clustering.algorithms.kmedoids.KMedoidsModel
+import clustering.algorithms.kmedoids.components.SwapMove
 import clustering.core.{Clusterer, Weights}
 import clustering.distance.{DistanceMetric, EuclideanDistance}
 import clustering.utils.PartitionAggregator
@@ -167,8 +169,8 @@ class DistributedFastPAM(
 
     if (SwapMove.isImprovement(best)) {
       isMedoid(medoids(best.slot)) = false
-      medoids(best.slot)           = best.candidate
-      isMedoid(best.candidate)     = true
+      medoids(best.slot) = best.candidate
+      isMedoid(best.candidate) = true
       true
     } else {
       false
