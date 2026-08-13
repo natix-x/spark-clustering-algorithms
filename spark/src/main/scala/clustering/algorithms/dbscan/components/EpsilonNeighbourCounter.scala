@@ -17,7 +17,7 @@ object EpsilonNeighbourCounter {
 
   private val logger = getLogger
 
-  private val HARD_POINT_LIMIT = 2000000
+  private val HARD_POINT_LIMIT = 50000 // do not allow more points
 
   /** As many candidates as fit the broadcast budget (capped at `HARD_POINT_LIMIT`), split evenly
    *  so no chunk is left with only a handful of points (each chunk costs a full scan of

@@ -8,22 +8,13 @@ import org.apache.spark.sql.functions.{col, monotonically_increasing_id}
 
 import scala.util.Random
 
-/** How the m candidate core points are chosen — the knob that decides how much of the
- *  accuracy DBSCAN++ keeps for a given cost.
- *
- *  The paper (Jang & Jiang, ICML 2019) offers uniform random and greedy K-center
- *  (a 2-approximation, generally better in their experiments); `linspace` comes from the
- *  Spark DBSCAN++ realisation (IJDSA 2026) and is the cheapest of the three. All are
- *  P2: one job in DataFrame/Catalyst idioms, result collected to the driver, then broadcast by
- *  the counting job.
- */
+/** How the m candidate core points are chosen — the knob that decides how much accuracy
+ *  DBSCAN++ keeps for a given cost. Rationale for each strategy: `docs/dbscanpp_docs.md` §2. */
 sealed trait CandidateSelectionStrategy extends Serializable {
   def strategyName: String
 
-  /** Selects at most `m` candidates from `data` (`n` rows, `features` column).
-   *
-   *  Selection is over ROWS, not weight-proportional: candidates only have to cover the space,
-   *  and the densities that decide core-point status are counted with weights afterwards. */
+  /** Selects at most `m` candidates from `data` (`n` rows, `features` column). Selection is over
+   *  ROWS, not weight-proportional — densities are counted with weights afterwards. */
   def selectCandidates(
     datasetPoints: DataFrame,
     totalRowCount: Long,
@@ -32,13 +23,8 @@ sealed trait CandidateSelectionStrategy extends Serializable {
     distanceMetric: DistanceMetric): Array[Vector]
 }
 
-/** Uniform random subsample — the paper's O(n) strategy.
- *
- *  Fraction is (m + 3√m)/n, not m/n: `sample` is a per-row Bernoulli trial, so m/n returns
- *  m ± √m rows and half the seeds undershoot. The overshoot is trimmed to exactly m with a
- *  seeded RNG on the driver — not with `take(m)`, which is `CollectLimitExec` and would take
- *  the first partitions only (prefix bias on data ordered by position: Gaia, TLC).
- */
+/** Uniform random subsample — the paper's O(n) strategy. Fraction is oversampled and trimmed to
+ *  exactly m; see `docs/dbscanpp_docs.md` §2 for why. */
 object UniformSelection extends CandidateSelectionStrategy {
   val strategyName = "uniform"
 
@@ -67,20 +53,8 @@ object UniformSelection extends CandidateSelectionStrategy {
   }
 }
 
-/** Strided selection over the dataset's own order — no RNG, one pass, the cheapest of the
- *  three. Honest weakness: on data ordered by position (Gaia by sky region, TLC by time) a
- *  stride can systematically miss regions.
- *
- *  Not a GLOBAL linspace: `monotonically_increasing_id` is `partitionId << 33 |
- *  rowInPartition`, so `id % k === 0` strides within each partition with a phase that jumps
- *  at partition boundaries. It is also a `nondeterministic` Catalyst expression — reproducible
- *  only for a fixed partitioning. A true global stride would need `zipWithIndex` or
- *  `row_number()` over an `orderBy`.
- *
- *  Two steps, not one modulo: no `rowId % k` lands on exactly m rows, and `take(m)` would add
- *  prefix bias (and for s > 0.5 the stride collapses to 1 and spreads nothing). So the filter
- *  keeps AT LEAST m rows, and the exact count comes from a linspace over the collected array.
- */
+/** Strided selection over the dataset's own order — no RNG, one pass, the cheapest of the three,
+ *  but per-partition rather than global. See `docs/dbscanpp_docs.md` §2. */
 object LinspaceSelection extends CandidateSelectionStrategy {
   val strategyName = "linspace"
 
@@ -94,9 +68,6 @@ object LinspaceSelection extends CandidateSelectionStrategy {
     if (targetCandidateCount >= totalRowCount) {
       featureVectors.collect().map(_.getAs[Vector](Columns.Features))
     } else {
-      // Monotone and contiguous within a partition, which is all a per-partition stride
-      // needs, and it avoids an RDD zipWithIndex pass. See the class docstring for what
-      // this stride is and is not.
       val withId = featureVectors.withColumn("rowId", monotonically_increasing_id())
       val kept =
         if (2L * targetCandidateCount <= totalRowCount) {
@@ -105,9 +76,6 @@ object LinspaceSelection extends CandidateSelectionStrategy {
           withId.filter(col("rowId") % math.ceil(totalRowCount.toDouble / (totalRowCount - targetCandidateCount)).toLong =!= 0L)
         }  // ≥ m, ≤ n < 2m
       val rows = kept.select(col(Columns.Features)).collect().map(_.getAs[Vector](Columns.Features))
-      // Phase restarts per partition, so the kept count deviates by O(#partitions), not by
-      // one row: a partition narrower than the stride yields 0 or 1 rows. Plot the m that
-      // DBSCANpp logs, never the nominal one.
       if (rows.length <= targetCandidateCount) {
         rows
       } else {
@@ -118,15 +86,8 @@ object LinspaceSelection extends CandidateSelectionStrategy {
 }
 
 /** Greedy K-center (farthest-first traversal): repeatedly add the point farthest from those
- *  chosen so far — a 2-approximation of the minimax radius, so coverage beats uniform.
- *
- *  **Documented deviation.** The paper traverses the full dataset, which needs m sequential
- *  distributed rounds (5 000 Spark jobs). Here it runs on the driver over a uniform POOL of
- *  `poolFactor · m` points: one job, then O(m · |pool| · d) across the driver's cores. The
- *  guarantee then holds against the pool, not the full data — say so in the thesis.
- *  `poolFactor` is a second accuracy-vs-cost knob: at 1 the strategy IS uniform, and where
- *  its advantage saturates is a cheap empirical result.
- */
+ *  chosen so far — a 2-approximation of the minimax radius, run over a driver-local pool rather
+ *  than the full dataset. Deviation from the paper and the `poolFactor` knob: `docs/dbscanpp_docs.md` §2. */
 final class KCenterSelectionStrategy(val poolFactor: Int = 4) extends CandidateSelectionStrategy {
   val strategyName = "kcenter"
 
