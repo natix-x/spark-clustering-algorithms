@@ -1,5 +1,7 @@
-package clustering.algorithms.kmedoids
+package clustering.algorithms.kmedoids.local
 
+import clustering.algorithms.kmedoids.components._
+import clustering.algorithms.kmedoids.KMedoidsModel
 import clustering.distance.{DistanceMetric, EuclideanDistance}
 import clustering.utils.DriverParallelism
 import org.apache.spark.ml.linalg.Vector
