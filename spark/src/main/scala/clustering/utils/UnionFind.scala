@@ -1,6 +1,6 @@
 package clustering.utils
 
-/** Driver-local union-find (disjoint sets) over `size` elements.
+/**
  *
  *  `union` attaches the larger root under the smaller (no union-by-rank), so `find(i)`
  *  returns the smallest index in i's component — makes derived cluster ids reproducible.
@@ -23,12 +23,17 @@ final class UnionFind(size: Int) {
     root
   }
 
-  def union(a: Int, b: Int): Unit = {
+  /** @return `true` if `a` and `b` were in different components (a real merge happened),
+   *          `false` if they already shared a root (no-op) — callers that only need to ship the
+   *          STRUCTURAL edges of a component (not every redundant one that touches it) filter on
+   *          this. */
+  def union(a: Int, b: Int): Boolean = {
     val ra = find(a)
     val rb = find(b)
     if (ra != rb) {
       if (ra < rb) parent(rb) = ra else parent(ra) = rb
-    }
+      true
+    } else false
   }
 
   /** Contiguous component ids from 0, numbered by ascending minimum member index — so
