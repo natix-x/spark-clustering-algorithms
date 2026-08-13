@@ -17,4 +17,25 @@ object UnitSphereDistance extends DistanceMetric {
   override def compute(a: Vector, b: Vector): Double = {
     1.0 - a.dot(b)
   }
+
+  override def withinRadius(a: Array[Double], b: Array[Double], radius: Double): Boolean = {
+    var dot = 0.0
+    var i = 0
+    while (i < a.length) {
+      dot += a(i) * b(i)
+      i += 1
+    }
+    1.0 - dot <= radius
+  }
+
+  override def distanceUpTo(a: Array[Double], b: Array[Double], bound: Double): Double = {
+    var dot = 0.0
+    var i = 0
+    while (i < a.length) {
+      dot += a(i) * b(i)
+      i += 1
+    }
+    val d = 1.0 - dot
+    if (d <= bound) d else Double.PositiveInfinity
+  }
 }
