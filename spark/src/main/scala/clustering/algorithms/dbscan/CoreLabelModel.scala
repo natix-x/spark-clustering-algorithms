@@ -8,18 +8,14 @@ import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.functions.{col, udf}
 
 
-/** A fitted density model: labelled core points, plus the rule that labels everything else.
- *
- *  Assignment is one broadcast map — the core set is at most m points, so labelling needs no
- *  join and no second distributed pass.
+/** A fitted density model: labelled core points, plus the rule that labels everything else — step
+ *  4 of DBSCAN++. Assignment semantics and rationale: `docs/dbscanpp_docs.md` §5.
  *
  *  @param corePoints        core-point coordinates
  *  @param coreClusterLabels cluster id of each core point; contiguous from 0, numbered by
  *                           ascending smallest candidate index, so independent of partitioning
- *  @param requireWithinEps  `true` (config `assign: eps`) = a point joins its closest core only
- *                           if that core is within ε, else `-1` — classic DBSCAN noise
- *                           semantics. `false` (`assign: closest`) = the paper's rule, which
- *                           assigns every point and so emits no noise at all.
+ *  @param requireWithinEps  `true` (config `assign: eps`) = classic DBSCAN noise semantics.
+ *                           `false` (`assign: closest`) = the paper's rule, no noise at all.
  */
 class CoreLabelModel(
   val corePoints: Array[Vector],
@@ -33,49 +29,47 @@ class CoreLabelModel(
     s"cores (${corePoints.length}) and labels (${coreClusterLabels.length}) must have the same length")
 
   /** Number of clusters found; 0 when the parameters produced no core point at all. */
-  def numClusters: Int = if (coreClusterLabels.isEmpty) {
+  def getNumberOfClusters: Int = if (coreClusterLabels.isEmpty) {
     0
   } else {
     coreClusterLabels.distinct.length
   }
 
-  // Broadcast once, not per assignClusters call (evaluation makes several passes) and not
-  // serialised into every task closure. Never destroyed: one run fits one model, so the
-  // context stop reclaims it.
-  @transient private var broadcastCorePoints:  Broadcast[Array[Vector]] = _
-  @transient private var broadcastCoreLabels: Broadcast[Array[Int]]    = _
+  // Lazily broadcast once and cached (assignClusters may run several times); never destroyed —
+  // one run fits one model, so the SparkContext shutdown reclaims it.
+  @transient private var broadcastCorePointsCoords: Broadcast[Array[Array[Double]]] = _
+  @transient private var broadcastCorePointsLabels: Broadcast[Array[Int]]           = _
 
   override def assignClusters(data: DataFrame): DataFrame = {
     val sc = data.sparkSession.sparkContext
     synchronized {
-      if (broadcastCorePoints == null)  broadcastCorePoints  = sc.broadcast(corePoints)
-      if (broadcastCoreLabels == null) broadcastCoreLabels = sc.broadcast(coreClusterLabels)
+      if (broadcastCorePointsCoords == null) broadcastCorePointsCoords = sc.broadcast(corePoints.map(_.toArray))
+      if (broadcastCorePointsLabels == null) broadcastCorePointsLabels = sc.broadcast(coreClusterLabels)
     }
-    val udfBroadcastCores = broadcastCorePoints
-    val udfBroadcastLabels = broadcastCoreLabels
+    val udfBroadcastCores = broadcastCorePointsCoords
+    val udfBroadcastLabels = broadcastCorePointsLabels
     val udfDistanceMetric = distanceMetric
     val udfEps = eps
     val udfRequireWithinEps = requireWithinEps
 
     val assignNearestClusterUDF = udf { features: Vector =>
       val availableCorePoints = udfBroadcastCores.value
+      val pointCoords = features.toArray
       var nearestCoreIndex = -1
-      var minDistanceToCore = Double.MaxValue
+      // Starts at ε when requireWithinEps: a nearest core beyond ε is noise regardless, so it
+      // need not be measured exactly. See docs/dbscanpp_docs.md §5.
+      var searchBound = if (udfRequireWithinEps) udfEps else Double.PositiveInfinity
       var coreIndex = 0
       while (coreIndex < availableCorePoints.length) {
-        val d = udfDistanceMetric.compute(features, availableCorePoints(coreIndex))
-        if (d < minDistanceToCore) {
-          minDistanceToCore = d
+        val d = udfDistanceMetric.distanceUpTo(pointCoords, availableCorePoints(coreIndex), searchBound)
+        // `<` keeps the FIRST of several equidistant cores — ties resolve by ascending core index.
+        if (d < searchBound || (nearestCoreIndex < 0 && d <= searchBound)) {
+          searchBound = d
           nearestCoreIndex = coreIndex
         }
         coreIndex += 1
       }
-      val isOutsideEpsilon = udfRequireWithinEps && (minDistanceToCore > udfEps)
-      if (nearestCoreIndex < 0 || isOutsideEpsilon) {
-        -1
-      } else {
-        udfBroadcastLabels.value(nearestCoreIndex)
-      }
+      if (nearestCoreIndex < 0) -1 else udfBroadcastLabels.value(nearestCoreIndex)
     }
 
     data.withColumn(Columns.Prediction, assignNearestClusterUDF(col(Columns.Features)))

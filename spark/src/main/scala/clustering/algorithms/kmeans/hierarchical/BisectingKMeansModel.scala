@@ -1,4 +1,4 @@
-package clustering.algorithms.kmeans
+package clustering.algorithms.kmeans.hierarchical
 
 import clustering.core.{Columns, Model}
 import clustering.distance.DistanceMetric

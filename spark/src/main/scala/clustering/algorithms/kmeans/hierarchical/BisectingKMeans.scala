@@ -1,6 +1,8 @@
-package clustering.algorithms.kmeans
+package clustering.algorithms.kmeans.hierarchical
 
-import clustering.core.{Clusterer, Columns, EuclideanGeometry, Geometry, Weights}
+import clustering.algorithms.kmeans._
+import clustering.algorithms.kmeans.hierarchical.BisectingKMeans.LeafState
+import clustering.core._
 import clustering.distance.DistanceMetric
 import org.apache.spark.ml.linalg.Vector
 import org.apache.spark.ml.stat.Summarizer
@@ -8,8 +10,6 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{DataFrame, Row}
 import org.apache.spark.storage.StorageLevel
 import org.log4s.getLogger
-
-import clustering.algorithms.kmeans.BisectingKMeans.LeafState
 
 import scala.collection.mutable.ArrayBuffer
 

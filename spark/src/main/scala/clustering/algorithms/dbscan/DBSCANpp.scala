@@ -1,5 +1,6 @@
 package clustering.algorithms.dbscan
 
+import clustering.algorithms.dbscan.components.{CandidateSelectionStrategy, EpsilonGraphComponents, EpsilonNeighbourCounter, UniformSelection}
 import clustering.core.{Clusterer, Weights}
 import clustering.distance.{DistanceMetric, EuclideanDistance}
 import org.apache.spark.sql.DataFrame

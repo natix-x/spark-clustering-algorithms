@@ -1,4 +1,4 @@
-package clustering.algorithms.dbscan
+package clustering.algorithms.dbscan.utils
 
 private[dbscan] sealed trait ExecutionPlan
 private[dbscan] object ExecutionPlan {

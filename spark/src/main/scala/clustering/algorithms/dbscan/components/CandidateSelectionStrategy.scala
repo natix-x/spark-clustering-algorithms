@@ -1,4 +1,4 @@
-package clustering.algorithms.dbscan
+package clustering.algorithms.dbscan.components
 
 import clustering.core.Columns
 import clustering.distance.DistanceMetric

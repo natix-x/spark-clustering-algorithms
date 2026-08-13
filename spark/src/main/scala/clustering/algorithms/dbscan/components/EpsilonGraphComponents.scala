@@ -1,10 +1,11 @@
-package clustering.algorithms.dbscan
+package clustering.algorithms.dbscan.components
 
+import clustering.algorithms.dbscan.utils.{ExecutionPlan, ScanProgress}
 import clustering.distance.DistanceMetric
 import clustering.utils.UnionFind
-import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.ml.linalg.Vector
 import org.apache.spark.network.util.JavaUtils
+import org.apache.spark.{SparkConf, SparkContext}
 import org.log4s.getLogger
 
 import scala.collection.mutable

@@ -1,4 +1,4 @@
-package clustering.algorithms.dbscan
+package clustering.algorithms.dbscan.utils
 
 import org.log4s.getLogger
 
