@@ -17,7 +17,7 @@ class KMeans(
   override def fit(data: DataFrame): KMeansModel = {
     val setup = LloydKMeans.initialize(data, geometry, k, seed, StorageLevel.MEMORY_AND_DISK)
     val centroids = LloydKMeans.run(setup.preparedPoints, setup.initialCentroids, setup.fitDistance, geometry, maxIter, eps)
-    setup.preparedPoints.unpersist(blocking = false)
+    setup.release()
     new KMeansModel(centroids, geometry.modelDistance)
   }
 }

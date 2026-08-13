@@ -30,8 +30,11 @@ class BisectingKMeans(
     require(k >= 1, s"k must be >= 1, got $k")
 
     val fitDistance = geometry.fitDistance
-    val preparedPoints = geometry.prepare(Weights.withWeights(data))
-      .persist(StorageLevel.MEMORY_AND_DISK)
+    // Same rule as LloydKMeans: only a `prepare` that computes something earns its own cache;
+    // otherwise this is a projection of the caller's cached data.
+    val projectedRoot  = geometry.prepare(Weights.withWeights(data))
+    val ownsRootCache  = geometry.transformsFeatures
+    val preparedPoints = if (ownsRootCache) projectedRoot.persist(StorageLevel.MEMORY_AND_DISK) else projectedRoot
 
     val rootCentroid = geometry.project(calculateCentroid(preparedPoints))
     val rootNode = new BisectingKMeans.BuildingNode(rootCentroid)
@@ -48,7 +51,7 @@ class BisectingKMeans(
       if (candidates.isEmpty) {
         logger.warn(s"bisecting k-means: no splittable leaf left after ${leaves.size} clusters " +
           s"(requested k=$k) — stopping early")
-        return buildModel(preparedPoints, leaves, rootNode)
+        return buildModel(preparedPoints, ownsRootCache, leaves, rootNode)
       }
       val target = candidates.maxBy(i => leaves(i).cost)
       val leaf = leaves(target)
@@ -106,7 +109,7 @@ class BisectingKMeans(
       }
     }
 
-    buildModel(preparedPoints, leaves, rootNode)
+    buildModel(preparedPoints, ownsRootCache, leaves, rootNode)
   }
 
   // A leaf can be split while it holds at least two rows and its points are not all identical.
@@ -115,11 +118,12 @@ class BisectingKMeans(
   /** Releases every cached subset and freezes the mutable tree into the model. */
   private def buildModel(
                       prepared: DataFrame,
+                      ownsPreparedCache: Boolean,
                       leaves: ArrayBuffer[LeafState],
                       root: BisectingKMeans.BuildingNode
   ): BisectingKMeansModel = {
     leaves.foreach(l => if (l.points ne prepared) l.points.unpersist(blocking = false))
-    prepared.unpersist(blocking = false)
+    if (ownsPreparedCache) prepared.unpersist(blocking = false)
     new BisectingKMeansModel(BisectingKMeans.freeze(root, Array(0)), geometry.modelDistance)
   }
 

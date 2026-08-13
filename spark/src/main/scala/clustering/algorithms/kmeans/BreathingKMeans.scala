@@ -93,7 +93,7 @@ class BreathingKMeans(
     if (cycles >= maxCycles)
       logger.warn(s"breathing: stopped at the maxCycles=$maxCycles bound with m=$currentM")
 
-    setup.preparedPoints.unpersist(blocking = false)
+    setup.release()
     new KMeansModel(bestCentroids, geometry.modelDistance)
   }
 
@@ -163,10 +163,6 @@ class BreathingKMeans(
    *    - `utility` = Σ_{x∈C_i} w · (d2² − d1²)    — U(c_i) = φ(C∖{c_i}) − φ(C), the breathe-out
    *      criterion: exactly the error increase caused by deleting c_i, since its points would
    *      fall back on their second-nearest centroid.
-   *
-   *  The UDF emits three plain numeric columns, so the aggregation is a normal `groupBy`/`sum`
-   *  over at most k+m groups — no vector round-trip, unlike the reductions discussed in
-   *  [[clustering.algorithms.density.EpsilonNeighborCounting]].
    *
    *  Breathing-only, hence private here rather than in [[LloydKMeans]] — no other centroid-based
    *  algorithm in this package needs it.

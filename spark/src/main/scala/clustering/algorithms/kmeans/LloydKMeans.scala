@@ -24,7 +24,18 @@ import org.apache.spark.storage.StorageLevel
  */
 private[kmeans] object LloydKMeans {
 
-  final case class LloydContext(preparedPoints: DataFrame, fitDistance: DistanceMetric, initialCentroids: Array[Vector])
+  /** The prepared points plus everything derived from them once per fit.
+   *
+   *  `release()` is a no-op unless this fit created the cache — the caller's cache is never
+   *  unpersisted from in here (see [[clustering.core.Clusterer.fit]]). */
+  final case class LloydContext(
+    preparedPoints:   DataFrame,
+    fitDistance: DistanceMetric,
+    initialCentroids: Array[Vector],
+    ownsCache: Boolean
+  ) {
+    def release(): Unit = if (ownsCache) preparedPoints.unpersist(blocking = false)
+  }
 
   def initialize(
     data:         DataFrame,
@@ -34,14 +45,19 @@ private[kmeans] object LloydKMeans {
     storageLevel: StorageLevel
   ): LloydContext = {
     val fitDistance = geometry.fitDistance
-    val preparedPoints = geometry.prepare(Weights.withWeights(data)).persist(storageLevel)
+    // Cached only when `prepare` actually computes something (spherical normalises every row, so
+    // every iteration would redo the UDF). A no-op `prepare` leaves a bare projection of the
+    // caller's data, whose cache Catalyst reuses — persisting it would just duplicate it.
+    val projected = geometry.prepare(Weights.withWeights(data))
+    val ownsCache = geometry.transformsFeatures
+    val preparedPoints = if (ownsCache) projected.persist(storageLevel) else projected
     val n = preparedPoints.count()
 
     val initialCentroids = sampleInitialCentroids(preparedPoints, k, seed)
     require(initialCentroids.length == k,
       s"Could not sample $k initialCentroids centroids — dataset too small (n=$n).")
 
-    LloydContext(preparedPoints, fitDistance, initialCentroids)
+    LloydContext(preparedPoints, fitDistance, initialCentroids, ownsCache)
   }
 
   def run(
