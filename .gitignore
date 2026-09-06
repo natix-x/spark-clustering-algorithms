@@ -50,6 +50,11 @@ build/
 __pycache__/
 *.py[cod]
 
+### Exclude experiment configs (for now leave only example.json and parquet.json) ###
+local_testing/experiment_configs/
+!local_testing/experiment_configs/example.json
+!local_testing/experiment_configs/parquet.json
+
 ### Benchmark output / Spark scratch ###
 benchmark-results/
 local_testing/results/

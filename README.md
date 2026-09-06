@@ -23,9 +23,33 @@ engine-agnostic and live in the shared repo: [`clustering-algorithms-benchmark`]
 
 > **Note:** Some documentation and diagrams are in Polish, as the master thesis they accompany is written in Polish.
 
-Implemented algorithms:
-TODO: ADD DESCRIPTIONS/DIAGRAMS/WHAT CAN BE CONFIGURED HERE
+## Implemented algorithms
 
+Registry name (`config.algorithm.name`) → factory in
+[`AlgorithmRegistry.scala`](spark/src/main/scala/clustering/benchmark/registry/AlgorithmRegistry.scala):
+
+- **`kmeans`** — Lloyd's k-means, `geometry: euclidean|spherical`, `refine: none|breathing`.
+  [`KMeans.scala`](spark/src/main/scala/clustering/algorithms/kmeans/KMeans.scala) ·
+  [`LloydKMeans.scala`](spark/src/main/scala/clustering/algorithms/kmeans/LloydKMeans.scala) ·
+  [`BreathingKMeans.scala`](spark/src/main/scala/clustering/algorithms/kmeans/BreathingKMeans.scala)
+- **`bisectingkmeans`** — divisive 2-means tree.
+  [`BisectingKMeans.scala`](spark/src/main/scala/clustering/algorithms/kmeans/hierarchical/BisectingKMeans.scala)
+- **`distfastpam`** — distributed FastPAM1 k-medoids (broadcast + `treeAggregate`).
+  [`DistributedFastPAM.scala`](spark/src/main/scala/clustering/algorithms/kmedoids/distributed/DistributedFastPAM.scala)
+- **`clara`** — PAM over random samples, `inner: fastpam|fasterpam`.
+  [`CLARA.scala`](spark/src/main/scala/clustering/algorithms/kmedoids/hybrid/CLARA.scala) ·
+  [`FastPAM.scala`](spark/src/main/scala/clustering/algorithms/kmedoids/local/FastPAM.scala) ·
+  [`FasterPAM.scala`](spark/src/main/scala/clustering/algorithms/kmedoids/local/FasterPAM.scala)
+- **`pamae`** — CLARA seeding + distributed Voronoi refinement (PAMAE, KDD 2017).
+  [`PAMAE.scala`](spark/src/main/scala/clustering/algorithms/kmedoids/hybrid/PAMAE.scala)
+- **`dbscanpp`** (alias **`dbscanexact`** at `coreSampleFraction: 1.0`) — DBSCAN++, distributed
+  ε-neighbour counting + ε-graph, driver-local union-find.
+  [`DBSCANpp.scala`](spark/src/main/scala/clustering/algorithms/dbscan/DBSCANpp.scala)
+
+Evaluation metrics (`config.evaluation.metrics`):
+[`SilhouetteEvaluator.scala`](spark/src/main/scala/clustering/evaluation/SilhouetteEvaluator.scala) ·
+[`DaviesBouldinEvaluator.scala`](spark/src/main/scala/clustering/evaluation/DaviesBouldinEvaluator.scala) ·
+[`CalinskiHarabaszEvaluator.scala`](spark/src/main/scala/clustering/evaluation/CalinskiHarabaszEvaluator.scala)
 
 ## Architecture
 
@@ -58,20 +82,18 @@ flowchart TD
     REG -->|"przekazanie gotowych instancji"| LOAD
   end
 
-  subgraph TELE ["Zbieranie metryk (w tle, równolegle)"]
+  subgraph TELE ["Zbieranie metryk"]
     direction TB
-    BL["Metryki na poziomie silnika Spark<br/>(BenchmarkListener)"]
-    PCP["Zużycie zasobów JVM executora<br/>(ProcessCpuPlugin)"]
+    PCP["Zużycie zasobów JVM executora i drivera<br/>(ProcessCpuPlugin)"]
   end
 
-  CLUSTER -.->|"asynchroniczne eventy (Event Bus)"| BL
   CLUSTER -.->|"próbkowanie JVM executorów (RPC)"| PCP
 
   CLUSTER -->|"koniec obliczeń"| STOP
 
   subgraph FINISH ["2. Agregacja i zakończenie"]
     direction TB
-    STOP["Zamknięcie sesji, opróżnienie Event Busa<br/>(spark.stop())"]
+    STOP["Zamknięcie sesji, ostatnia próbka executorów<br/>(spark.stop())"]
     READ["Odczyt zebranych metryk"]
     RES["Scalenie metryk, wyników i czasów<br/>(RunResult.from)"]
 
@@ -106,12 +128,15 @@ Core abstractions (`clustering.core`) keep algorithms uniform:
 ├── spark/                        # Scala/Spark SBT project (the fat jar)
 │   ├── build.sbt                 # Scala/Spark build, assembly into a fat jar
 │   ├── src/main/scala/clustering/
-│   │   ├── core/                 # Clusterer / Model abstractions
-│   │   ├── algorithms/           # clustering algorithms implementations
-│   │   ├── distance/             # Euclidean / Manhattan / Cosine metrics
-│   │   ├── evaluation/           # clustering metrics
-│   │   ├── utils/                # convergence checks
-│   │   └── benchmark/            # runner (--config) + config, datasource, evaluation, metrics, registry
+│   │   ├── core/                 # Clusterer / Model / Geometry / Weights abstractions
+│   │   ├── algorithms/
+│   │   │   ├── kmeans/           # Lloyd, breathing refine, bisecting (hierarchical/)
+│   │   │   ├── kmedoids/         # FastPAM/FasterPAM (local/), DistributedFastPAM (distributed/), CLARA/PAMAE (hybrid/)
+│   │   │   └── dbscan/           # DBSCAN++ / exact DBSCAN (components/, utils/)
+│   │   ├── distance/             # Euclidean / Manhattan / Cosine / UnitSphere metrics
+│   │   ├── evaluation/           # Silhouette / Davies-Bouldin / Calinski-Harabasz
+│   │   ├── utils/                # convergence, partition aggregation, union-find
+│   │   └── benchmark/            # runner (--config) + config, datasource, evaluation runner, metrics, registry
 │   └── ...
 ├── local_run.sh                  # spark-submit a single run locally
 ├── local_testing/                # JSON configs for local single-run testing

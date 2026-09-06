@@ -11,7 +11,6 @@ libraryDependencies ++= Seq(
   "org.apache.spark" %% "spark-core"   % sparkVersion % "provided",
   "org.apache.spark" %% "spark-sql"    % sparkVersion % "provided",
   "org.apache.spark" %% "spark-mllib"  % sparkVersion % "provided",
-  "graphframes" % "graphframes" % "0.8.2-spark3.2-s_2.12",
   "org.apache.commons" % "commons-math3" % "3.6.1",
   "org.log4s" %% "log4s" % "1.10.0",
   "org.apache.logging.log4j" % "log4j-slf4j2-impl" % "2.20.0" % "provided",
@@ -34,6 +33,10 @@ Test / dependencyClasspath := {
   }
 }
 Test / fork := true
+
+// Several suites build their own SparkSession (and getOrCreate hands out a shared one),
+// so suites must not run concurrently inside the forked JVM.
+Test / parallelExecution := false
 
 // Keep Jackson pinned to Spark 3.3.2's version everywhere; networknt (test-only)
 // would otherwise drag a newer Jackson that breaks jackson-module-scala 2.13.4.
