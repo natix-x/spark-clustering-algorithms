@@ -21,6 +21,22 @@ import org.apache.spark.ml.linalg.{Vector, Vectors}
 trait DistanceMetric extends Serializable {
   def compute(a: Vector, b: Vector): Double
 
+  /** `d(a, b)` on raw coordinate arrays — the FULL distance, for callers that need the value and
+   *  have no bound to exploit (pairwise matrices, medoid cost folds, BUILD/SWAP accumulators).
+   *
+   *  Same motivation as [[withinRadius]] minus the early exit: the `Vector` form pays a
+   *  dense/sparse type match inside the library call plus a wrapper dereference per comparison,
+   *  and for the Euclidean metric it also pays a `sqrt` that the callers above almost never need
+   *  in the loop itself. Coordinates are unpacked ONCE per row or per collected point by the
+   *  caller, never per comparison.
+   *
+   *  This is the signature the Flink engine's metric seam has natively, so the two engines run the
+   *  same inner loop and the cross-engine timings lose a confounder. Must agree with
+   *  [[compute(Vector,Vector)]] exactly.
+   */
+  def compute(a: Array[Double], b: Array[Double]): Double =
+    compute(Vectors.dense(a), Vectors.dense(b))
+
   /** `d(a, b) <= radius` on raw coordinate arrays, for callers that only need the PREDICATE and
    *  never the distance — the ε-scans of `dbscanpp` (n·m in step 2, m²/2 in step 3) do nothing else.
    *

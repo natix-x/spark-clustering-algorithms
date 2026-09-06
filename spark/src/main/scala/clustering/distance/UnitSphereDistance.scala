@@ -18,6 +18,16 @@ object UnitSphereDistance extends DistanceMetric {
     1.0 - a.dot(b)
   }
 
+  override def compute(a: Array[Double], b: Array[Double]): Double = {
+    var dot = 0.0
+    var i = 0
+    while (i < a.length) {
+      dot += a(i) * b(i)
+      i += 1
+    }
+    1.0 - dot
+  }
+
   override def withinRadius(a: Array[Double], b: Array[Double], radius: Double): Boolean = {
     var dot = 0.0
     var i = 0

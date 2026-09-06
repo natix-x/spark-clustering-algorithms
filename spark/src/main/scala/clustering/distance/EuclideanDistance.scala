@@ -8,6 +8,18 @@ object EuclideanDistance extends DistanceMetric {
     math.sqrt(Vectors.sqdist(a, b))
   }
 
+  /** Raw-array full distance: no wrapper, no type match, one `sqrt`. */
+  override def compute(a: Array[Double], b: Array[Double]): Double = {
+    var sum = 0.0
+    var i = 0
+    while (i < a.length) {
+      val d = a(i) - b(i)
+      sum += d * d
+      i += 1
+    }
+    math.sqrt(sum)
+  }
+
   /** Squared distances, so no `sqrt`, plus an EARLY EXIT: once the partial sum passes r² the
    *  remaining coordinates cannot bring it back. */
   override def withinRadius(a: Array[Double], b: Array[Double], radius: Double): Boolean = {

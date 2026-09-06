@@ -16,6 +16,17 @@ object ManhattanDistance extends DistanceMetric {
     sum
   }
 
+  /** Raw-array full distance: no wrapper, no `toArray` round-trip. */
+  override def compute(a: Array[Double], b: Array[Double]): Double = {
+    var sum = 0.0
+    var i = 0
+    while (i < a.length) {
+      sum += math.abs(a(i) - b(i))
+      i += 1
+    }
+    sum
+  }
+
   /** Same early exit as [[EuclideanDistance.withinRadius]]: L1 sums are monotone, so once the
    *  partial sum passes the radius the pair is out. */
   override def withinRadius(a: Array[Double], b: Array[Double], radius: Double): Boolean = {
