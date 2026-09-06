@@ -2,243 +2,316 @@ package clustering.benchmark.metrics
 
 import clustering.benchmark.config.RunConfig
 import clustering.benchmark.evaluation.EvaluationResult
-import clustering.benchmark.metrics.BenchmarkListener.ListenerSnapshot
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{AtomicMoveNotSupportedException, Files, Path, Paths, StandardCopyOption, StandardOpenOption}
 
-/** One row of benchmark output. Flat by design so analysis in pandas is
- *  a single `pd.read_json` over the results directory.
- *
- *  Nested-shaped fields (algorithmParams, datasetMetadata, sparkConf,
- *  clusterSizes) are kept as maps; the merger script flattens them when
- *  producing the analysis Parquet.
+/**
+ * One row of benchmark output. Flat by design so analysis in pandas is
+ * a single `pd.read_json` over the results directory.
+ * Nested structures are kept as maps and flattened later by the merger script.
  */
 final case class RunResult(
-  // identity
-  runId:               String,
-  framework:           String,
-  profile:             String,
-  startedAtIso:        String,
-  finishedAtIso:       String,
-  status:              String,                   // "ok" | "failed"
-  errorMessage:        Option[String],
+  runId: String,
+  framework: String,
+  profile: String,
+  startedAtIso: String,
+  finishedAtIso: String,
+  status: String,
+  errorMessage: Option[String],
 
-  // experimental factors
-  algorithm:           String,
-  algorithmParams:     Map[String, String],
-  dataset:             String,
-  datasetMetadata:     Map[String, String],
-  sparkConf:           Map[String, String],
-  experimentMetadata:  Map[String, String],
+  algorithm: String,
+  algorithmParams: Map[String, String],
+  dataset: String,
+  datasetMetadata: Map[String, String],
+  sparkConf: Map[String, String],
+  experimentMetadata: Map[String, String],
 
-  // workload
-  nRows:               Long,
-  nPartitions:         Int,
-  nFeatures:           Option[Int],
+  nRows: Long,
+  nPartitions: Int,
+  nFeatures: Option[Int],
 
-  // wall-clock timings (driver, ms)
-  loadDurationMs:      Long,
-  fitDurationMs:       Long,
-  evalDurationMs:      Long,
-  totalDurationMs:     Long,
+  // Wall-clock timings (driver, ms)
+  loadDurationMs: Long,
+  fitDurationMs: Long,
+  evalDurationMs: Long,
+  totalDurationMs: Long,
 
-  // Spark listener — I/O
-  shuffleReadBytes:        Long,
-  shuffleWriteBytes:       Long,
-  inputBytes:              Long,
-  outputBytes:             Long,
+  /**
+   * Per-phase breakdown ("load", "fit", "eval").
+   * Excludes post-eval teardown (like cache unpersist or executor shutdown) to ensure
+   * the eval metrics only reflect the algorithm's actual execution and memory cost.
+   */
+  phaseDurationsMs: Map[String, Long],
+  phaseCpuTimeNs: Map[String, Long],
+  phaseGcTimeMs: Map[String, Long],
+  phaseMemoryGbHours: Map[String, Double],
+  phaseDriverCpuTimeNs: Map[String, Long],
+  phaseDriverGcTimeMs: Map[String, Long],
+  phaseDriverMemoryGbHours: Map[String, Double],
 
-  // Spark listener — spill (> 0 means the executor ran short of memory)
-  diskBytesSpilled:        Long,
-  memoryBytesSpilled:      Long,
+  /**
+   * Per-phase peaks bucketed as samples arrive.
+   * Heap is gap-free (JVM resets peak per tick), while direct memory is sampled
+   * and might miss sub-tick spikes.
+   */
+  phaseWindowPeakExecutorMemoryBytes: Map[String, Long],
+  phaseWindowTotalExecutorMemoryBytes: Map[String, Long],
+  phaseWindowPeakDirectMemoryBytes: Map[String, Long],
+  phaseWindowTotalDirectMemoryBytes: Map[String, Long],
+  phaseWindowDriverPeakHeapBytes: Map[String, Long],
+  phaseWindowDriverPeakDirectMemoryBytes: Map[String, Long],
 
-  // Spark listener — CPU
-  jvmGcTimeMs:             Long,
-  executorCpuTimeNs:       Long,
-  executorRunTimeMs:       Long,
-  avgCpuCoresBusy:         Option[Double],   // cpu / (totalDurationMs * 1e6) = avg cores busy; cross-comparable
+  // Note: I/O volume is deliberately omitted. Spark (compressed storage bytes) and
+  // Flink (serialized stream bytes) metrics are fundamentally incomparable.
 
-  // Spark listener — network / shuffle timing
-  shuffleFetchWaitTimeMs:  Long,
-  shuffleWriteTimeNs:      Long,
+  // Whole-JVM process metrics (Executors)
+  jvmGcTimeMs: Long,
+  executorCpuTimeNs: Long,
+  avgCpuCoresBusy: Option[Double],
+  cpuCoreHours: Double,
 
-  // Spark listener — tasks / stages / memory
-  taskCount:               Long,
-  failedTaskCount:         Long,
-  stageCount:              Long,
-  totalStageMs:            Long,
-  peakExecutorMemoryBytes: Long,   // MAX heap of single worker
-  totalExecutorMemoryBytes: Long,  // SUM of per-worker heap peaks (cluster footprint)
+  peakExecutorMemoryBytes: Long,
+  totalExecutorMemoryBytes: Long,
+  memoryGbHours: Double,
 
-  // Spark listener — unified memory split (execution/storage), spark-only.
-  // Peak per-executor (MAX across executors/stages) from ExecutorMetrics; 0 in
-  // local mode without polling. No Flink equivalent — null/0 on the Flink side.
-  peakOnHeapExecutionBytes: Long,  // peak execution region (shuffle/join/sort/agg)
-  peakOnHeapStorageBytes:   Long,  // peak storage region (cache/broadcast)
-  peakOnHeapUnifiedBytes:   Long,  // peak whole unified pool (execution + storage)
+  peakDirectMemoryBytes: Long,
+  totalDirectMemoryBytes: Long,
 
-  // evaluation — each is present only when the run requested that metric
-  // (EvaluationSpec.metrics); otherwise None, and json4s omits the key.
-  nClusters:           Option[Int],
-  noiseFraction:       Option[Double],
-  silhouette:          Option[Double],
-  clusterSizes:        Option[Map[String, Long]]  // keys are stringified cluster ids for JSON friendliness
+  // Driver JVM metrics (tracked separately as driver-local work is invisible to executors)
+  driverCpuTimeNs: Long,
+  driverCpuCoreHours: Double,
+  driverPeakHeapBytes: Long,
+  driverGcTimeMs: Long,
+  driverMemoryGbHours: Double,
+  driverPeakDirectMemoryBytes: Long,
+
+  // Evaluation metrics
+  nClusters: Option[Int],
+  noiseFraction: Option[Double],
+  silhouette: Option[Double],
+
+  /**
+   * Silhouette internals.
+   * `silhouetteSampleClusters` shows the actual number of clusters drawn in the sample.
+   * If lower than `nClusters`, some clusters were missed entirely.
+   */
+  silhouetteScoredPoints: Option[Int],
+  silhouetteSampleClusters: Option[Int],
+  silhouetteUnscoredPoints: Option[Int],
+  clusterSizes: Option[Map[String, String]],
+
+  /**
+   * Centroid-based indices computed on the FULL dataset.
+   * DB: lower-is-better (bounded below by 0).
+   * CH: higher-is-better (unbounded, comparable only within the same dataset).
+   */
+  daviesBouldin: Option[Double],
+  calinskiHarabasz: Option[Double]
 )
 
 object RunResult {
 
   private implicit val formats: Formats = DefaultFormats
 
-  // ── Parts handed in by the caller to assemble a RunResult ──────────────────
-  // The job samples each of these at the right moment and passes them to `from`;
-  // keeping them grouped is what lets `from` stay a plain field-by-field copy.
-
-  /** Driver wall-clock timings for one run, in ms. */
   final case class Timings(loadMs: Long, fitMs: Long, evalMs: Long, totalMs: Long)
 
-  /** Process-level metrics sampled once at the end of a run (from ProcessCpuPlugin). */
-  final case class ProcessMetrics(cpuNanos: Long, maxWorkerHeapBytes: Long, totalHeapBytes: Long)
-
-  /** Dataset workload facts measured during a run. */
-  final case class Workload(
-    dataset:         String,
-    datasetMetadata: Map[String, String],
-    nRows:           Long,
-    nPartitions:     Int,
-    nFeatures:       Option[Int]
+  final case class PhaseMetrics(
+    durationsMs: Map[String, Long],
+    cpuTimeNs: Map[String, Long],
+    gcTimeMs: Map[String, Long],
+    memoryGbHours: Map[String, Double],
+    driverCpuTimeNs: Map[String, Long],
+    driverGcTimeMs: Map[String, Long],
+    driverMemoryGbHours: Map[String, Double],
+    windowPeakWorkerHeapBytes: Map[String, Long],
+    windowTotalWorkerHeapBytes: Map[String, Long],
+    windowPeakWorkerDirectBytes: Map[String, Long],
+    windowTotalWorkerDirectBytes: Map[String, Long],
+    windowDriverHeapBytes: Map[String, Long],
+    windowDriverDirectBytes: Map[String, Long]
   )
+
+  object PhaseMetrics {
+    val empty: PhaseMetrics = PhaseMetrics(
+      Map.empty, Map.empty, Map.empty, Map.empty, Map.empty, Map.empty, Map.empty,
+      Map.empty, Map.empty, Map.empty, Map.empty, Map.empty, Map.empty
+    )
+
+    def from(
+      deltas: Seq[(String, ProcessCpuPlugin.PhaseDelta)],
+      durationsMs: Map[String, Long],
+      peaks: Seq[(String, ProcessCpuPlugin.PhasePeaks)]
+    ): PhaseMetrics = PhaseMetrics(
+      durationsMs = durationsMs,
+      cpuTimeNs = deltas.map { case (name, delta) => name -> delta.cpuNanos }.toMap,
+      gcTimeMs = deltas.map { case (name, delta) => name -> delta.gcTimeMs }.toMap,
+      memoryGbHours = deltas.map { case (name, delta) => name -> delta.heapByteSeconds / ByteSecondsPerGbHour }.toMap,
+      driverCpuTimeNs = deltas.map { case (name, delta) => name -> delta.driverCpuNanos }.toMap,
+      driverGcTimeMs = deltas.map { case (name, delta) => name -> delta.driverGcTimeMs }.toMap,
+      driverMemoryGbHours = deltas.map { case (name, delta) => name -> delta.driverHeapByteSeconds / ByteSecondsPerGbHour }.toMap,
+      windowPeakWorkerHeapBytes = peaks.map { case (name, peak) => name -> peak.maxWorkerHeapBytes }.toMap,
+      windowTotalWorkerHeapBytes = peaks.map { case (name, peak) => name -> peak.totalWorkerHeapBytes }.toMap,
+      windowPeakWorkerDirectBytes = peaks.map { case (name, peak) => name -> peak.maxWorkerDirectBytes }.toMap,
+      windowTotalWorkerDirectBytes = peaks.map { case (name, peak) => name -> peak.totalWorkerDirectBytes }.toMap,
+      windowDriverHeapBytes = peaks.map { case (name, peak) => name -> peak.driverHeapBytes }.toMap,
+      windowDriverDirectBytes = peaks.map { case (name, peak) => name -> peak.driverDirectBytes }.toMap
+    )
+  }
+
+  final case class ProcessMetrics(
+    cpuNanos: Long,
+    maxWorkerHeapBytes: Long,
+    totalHeapBytes: Long,
+    heapByteSeconds: Double,
+    gcTimeMs: Long,
+    maxWorkerDirectBytes: Long,
+    totalDirectBytes: Long,
+    driverCpuNanos: Long,
+    driverPeakHeapBytes: Long,
+    driverHeapByteSeconds: Double,
+    driverGcTimeMs: Long,
+    driverPeakDirectBytes: Long
+  )
+
+  private val NanosPerCoreHour: Double = 3.6e12
+  private val ByteSecondsPerGbHour: Double = 1024.0 * 1024 * 1024 * 3600.0
+
+  final case class Workload(
+    dataset: String,
+    datasetMetadata: Map[String, String],
+    nRows: Long,
+    nPartitions: Int,
+    nFeatures: Option[Int]
+  )
+
   object Workload {
-    /** Placeholder for a failed run — only the configured dataset type is known. */
     def empty(config: RunConfig): Workload =
       Workload(config.dataset.`type`, Map.empty, nRows = -1L, nPartitions = -1, nFeatures = None)
   }
 
-  /** Assemble one result row from the parts collected during a run.
-   *
-   *  The single place the output contract is built. Pure — no Spark, no clock or
-   *  metric reads; the caller ([[clustering.benchmark.SparkClusteringJob]]) samples
-   *  everything and hands it here. `status`/`errorMessage` and the (possibly empty)
-   *  `workload`/`eval` are the only difference between an ok and a failed run, so
-   *  there is one builder rather than a factory hierarchy. */
   def from(
-    config:        RunConfig,
-    framework:     String,
-    profile:       String,
-    startedAtIso:  String,
+    config: RunConfig,
+    framework: String,
+    profile: String,
+    startedAtIso: String,
     finishedAtIso: String,
-    status:        String,
-    errorMessage:  Option[String],
-    workload:      Workload,
-    timings:       Timings,
-    snap:          ListenerSnapshot,
-    process:       ProcessMetrics,
-    eval:          EvaluationResult
+    status: String,
+    errorMessage: Option[String],
+    workload: Workload,
+    timings: Timings,
+    phases: PhaseMetrics,
+    process: ProcessMetrics,
+    eval: EvaluationResult
   ): RunResult = RunResult(
-    runId                    = config.runId,
-    framework                = framework,
-    profile                  = profile,
-    startedAtIso             = startedAtIso,
-    finishedAtIso            = finishedAtIso,
-    status                   = status,
-    errorMessage             = errorMessage,
-    algorithm                = config.algorithm.name,
-    algorithmParams          = stringifyParams(config.algorithm.params),
-    dataset                  = workload.dataset,
-    datasetMetadata          = workload.datasetMetadata,
-    sparkConf                = config.spark_config,
-    experimentMetadata       = config.experimentMetadata,
-    nRows                    = workload.nRows,
-    nPartitions              = workload.nPartitions,
-    nFeatures                = workload.nFeatures,
-    loadDurationMs           = timings.loadMs,
-    fitDurationMs            = timings.fitMs,
-    evalDurationMs           = timings.evalMs,
-    totalDurationMs          = timings.totalMs,
-    shuffleReadBytes         = snap.shuffleReadBytes,
-    shuffleWriteBytes        = snap.shuffleWriteBytes,
-    inputBytes               = snap.inputBytes,
-    outputBytes              = snap.outputBytes,
-    diskBytesSpilled         = snap.diskBytesSpilled,
-    memoryBytesSpilled       = snap.memoryBytesSpilled,
-    jvmGcTimeMs              = snap.jvmGcTimeMs,
-    executorCpuTimeNs        = process.cpuNanos,   // process CPU (Flink-comparable)
-    executorRunTimeMs        = snap.executorRunTimeMs,
-    avgCpuCoresBusy          = avgCpuCoresBusy(process.cpuNanos, timings.totalMs),
-    shuffleFetchWaitTimeMs   = snap.shuffleFetchWaitTimeMs,
-    shuffleWriteTimeNs       = snap.shuffleWriteTimeNs,
-    taskCount                = snap.taskCount,
-    failedTaskCount          = snap.failedTaskCount,
-    stageCount               = snap.stageCount,
-    totalStageMs             = snap.totalStageMs,
-    peakExecutorMemoryBytes  = process.maxWorkerHeapBytes,   // MAX single worker
-    totalExecutorMemoryBytes = process.totalHeapBytes,       // SUM across workers
-    peakOnHeapExecutionBytes = snap.peakOnHeapExecutionBytes,
-    peakOnHeapStorageBytes   = snap.peakOnHeapStorageBytes,
-    peakOnHeapUnifiedBytes   = snap.peakOnHeapUnifiedBytes,
-    nClusters                = eval.nClusters,
-    noiseFraction            = eval.noiseFraction,
-    silhouette               = eval.silhouette,
-    clusterSizes             = eval.clusterSizes.map(_.map { case (k, v) => k.toString -> v })
+    runId = config.runId,
+    framework = framework,
+    profile = profile,
+    startedAtIso = startedAtIso,
+    finishedAtIso = finishedAtIso,
+    status = status,
+    errorMessage = errorMessage,
+    algorithm = config.algorithm.name,
+    algorithmParams = stringifyParams(config.algorithm.params),
+    dataset = workload.dataset,
+    datasetMetadata = workload.datasetMetadata,
+    sparkConf = config.spark_config,
+    experimentMetadata = config.experimentMetadata,
+    nRows = workload.nRows,
+    nPartitions = workload.nPartitions,
+    nFeatures = workload.nFeatures,
+    loadDurationMs = timings.loadMs,
+    fitDurationMs = timings.fitMs,
+    evalDurationMs = timings.evalMs,
+    totalDurationMs = timings.totalMs,
+    phaseDurationsMs = phases.durationsMs,
+    phaseCpuTimeNs = phases.cpuTimeNs,
+    phaseGcTimeMs = phases.gcTimeMs,
+    phaseMemoryGbHours = phases.memoryGbHours,
+    phaseDriverCpuTimeNs = phases.driverCpuTimeNs,
+    phaseDriverGcTimeMs = phases.driverGcTimeMs,
+    phaseDriverMemoryGbHours = phases.driverMemoryGbHours,
+    phaseWindowPeakExecutorMemoryBytes = phases.windowPeakWorkerHeapBytes,
+    phaseWindowTotalExecutorMemoryBytes = phases.windowTotalWorkerHeapBytes,
+    phaseWindowPeakDirectMemoryBytes = phases.windowPeakWorkerDirectBytes,
+    phaseWindowTotalDirectMemoryBytes = phases.windowTotalWorkerDirectBytes,
+    phaseWindowDriverPeakHeapBytes = phases.windowDriverHeapBytes,
+    phaseWindowDriverPeakDirectMemoryBytes = phases.windowDriverDirectBytes,
+    jvmGcTimeMs = process.gcTimeMs,
+    executorCpuTimeNs = process.cpuNanos,
+    avgCpuCoresBusy = calculateAvgCpuCoresBusy(process.cpuNanos, timings.totalMs),
+    cpuCoreHours = process.cpuNanos / NanosPerCoreHour,
+    peakExecutorMemoryBytes = process.maxWorkerHeapBytes,
+    totalExecutorMemoryBytes = process.totalHeapBytes,
+    memoryGbHours = process.heapByteSeconds / ByteSecondsPerGbHour,
+    peakDirectMemoryBytes = process.maxWorkerDirectBytes,
+    totalDirectMemoryBytes = process.totalDirectBytes,
+    driverCpuTimeNs = process.driverCpuNanos,
+    driverCpuCoreHours = process.driverCpuNanos / NanosPerCoreHour,
+    driverPeakHeapBytes = process.driverPeakHeapBytes,
+    driverGcTimeMs = process.driverGcTimeMs,
+    driverMemoryGbHours = process.driverHeapByteSeconds / ByteSecondsPerGbHour,
+    driverPeakDirectMemoryBytes = process.driverPeakDirectBytes,
+    nClusters = eval.nClusters,
+    noiseFraction = eval.noiseFraction,
+    silhouette = eval.silhouette,
+    silhouetteScoredPoints = eval.silhouetteScoredPoints,
+    silhouetteSampleClusters = eval.silhouetteSampleClusters,
+    silhouetteUnscoredPoints = eval.silhouetteUnscoredPoints,
+    clusterSizes = eval.clusterSizes.map(_.map { case (k, v) => k.toString -> v.toString }),
+    daviesBouldin = eval.daviesBouldin,
+    calinskiHarabasz = eval.calinskiHarabasz
   )
 
-  /** Average number of CPU cores busy over the run: `cpuNs / (totalDurationMs * 1e6)`
-   *  (CPU-seconds per wall-second = effective CPU parallelism). Same formula as the
-   *  Flink port; divide by allocated cores for a 0–1 utilization. None when duration <= 0. */
-  private def avgCpuCoresBusy(cpuNs: Long, totalDurationMs: Long): Option[Double] =
+  private def calculateAvgCpuCoresBusy(cpuNanos: Long, totalDurationMs: Long): Option[Double] =
     if (totalDurationMs <= 0) None
-    else Some(cpuNs / (totalDurationMs.toDouble * 1e6))
+    else Some(cpuNanos / (totalDurationMs.toDouble * 1e6))
 
-  /** json4s JObject -> Map[String, String] for the flat result schema: every param
-   *  value is rendered to its string form. */
   private def stringifyParams(params: JObject): Map[String, String] =
-    params.obj.map { case (k, v) =>
-      k -> (v match {
-        case JString(s)  => s
-        case JBool(b)    => b.toString
-        case JInt(n)     => n.toString
-        case JLong(n)    => n.toString
-        case JDouble(d)  => d.toString
+    params.obj.map { case (key, value) =>
+      key -> (value match {
+        case JString(s) => s
+        case JBool(b) => b.toString
+        case JInt(n) => n.toString
+        case JLong(n) => n.toString
+        case JDouble(d) => d.toString
         case JDecimal(d) => d.toString
-        case JNull       => "null"
-        case other       => compact(render(other))
+        case JNull => "null"
+        case other => compact(render(other))
       })
     }.toMap
 
-  /** Render a RunResult as a single-line compact JSON.
-   *  Perfect for `pd.read_json(..., lines=True)` in Python/Pandas.
-   */
-  def toJsonString(r: RunResult): String =
-    compact(render(Extraction.decompose(r)))
+  def toJsonString(runResult: RunResult): String =
+    compact(render(Extraction.decompose(runResult)))
 
-  /** Write the result to `<outputDir>/<runId>.json`, creating parents if
-   *  needed. Write to a tmp sibling then rename, so partial files never appear
-   *  under the final name (matters with array jobs scraping results in
-   *  parallel). The rename is atomic when the filesystem supports it, with a
-   *  REPLACE_EXISTING fallback for those that don't.
+  /**
+   * Writes the result to `<outputDir>/<runId>.json`.
+   * Uses an atomic move from a temporary file to avoid partial reads by downstream systems.
    */
-  def writeToDir(r: RunResult, outputDir: String): Path = {
-    val dir    = Paths.get(outputDir)
-    Files.createDirectories(dir)
+  def writeToDir(runResult: RunResult, outputDir: String): Path = {
+    val outputDirectory = Paths.get(outputDir)
+    Files.createDirectories(outputDirectory)
 
-    val target = dir.resolve(s"${r.runId}.json")
-    val tmp    = dir.resolve(s".${r.runId}.json.tmp")
+    val targetFile = outputDirectory.resolve(s"${runResult.runId}.json")
+    val tempFile = outputDirectory.resolve(s".${runResult.runId}.json.tmp")
 
     Files.write(
-      tmp,
-      toJsonString(r).getBytes(StandardCharsets.UTF_8),
+      tempFile,
+      toJsonString(runResult).getBytes(StandardCharsets.UTF_8),
       StandardOpenOption.CREATE,
       StandardOpenOption.TRUNCATE_EXISTING,
       StandardOpenOption.WRITE
     )
 
-    try Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE)
-    catch {
+    try {
+      Files.move(tempFile, targetFile, StandardCopyOption.ATOMIC_MOVE)
+    } catch {
       case _: AtomicMoveNotSupportedException =>
-        Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING)
+        Files.move(tempFile, targetFile, StandardCopyOption.REPLACE_EXISTING)
     }
-    target
+
+    targetFile
   }
 }

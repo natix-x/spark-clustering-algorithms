@@ -38,9 +38,15 @@ final case class DataSourceSpec(`type`: String, params: JObject)
 
 final case class AlgorithmSpec(name: String, params: JObject)
 
+/** @param sampleSize Silhouette subsample size. Defaults to 10,000 (matching Flink).
+ *                    `None` disables sampling (exact evaluation) but collects the whole
+ *                    labelled dataset to the driver. To prevent driver OOMs, `None` is
+ *                    explicitly refused if the dataset exceeds
+ *                    [[clustering.benchmark.evaluation.EvaluationRunner.FullSilhouetteMaxRows]].
+ */
 final case class EvaluationSpec(
   metrics: Seq[String] = Seq("silhouette", "nClusters", "clusterSizes", "noiseFraction"),
-  sampleSize: Option[Int] = None,
+  sampleSize: Option[Int] = Some(10000),
   seed: Long = 42L
 )
 

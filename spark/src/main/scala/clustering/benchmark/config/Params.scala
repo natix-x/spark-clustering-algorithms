@@ -11,30 +11,29 @@ final class Params(json: JObject) {
 
   private implicit val formats: Formats = DefaultFormats
 
-  def int(key: String): Int              = required(key).extract[Int]
+  def int(key: String): Int = required(key).extract[Int]
   def intOpt(key: String, default: Int): Int = opt(key).map(_.extract[Int]).getOrElse(default)
 
-  def double(key: String): Double        = required(key).extract[Double]
+  def double(key: String): Double = required(key).extract[Double]
   def doubleOpt(key: String, default: Double): Double = opt(key).map(_.extract[Double]).getOrElse(default)
 
-  def long(key: String): Long            = required(key).extract[Long]
+  def long(key: String): Long = required(key).extract[Long]
   def longOpt(key: String, default: Long): Long = opt(key).map(_.extract[Long]).getOrElse(default)
 
   def string(key: String): String = required(key) match {
     case JString(s) => s
-    case other      => throw new IllegalArgumentException(s"Param '$key' must be a string, got: $other")
+    case other => throw new IllegalArgumentException(s"Param '$key' must be a string, got: $other")
   }
 
   def stringOpt(key: String, default: String): String = opt(key) match {
     case None => default
-    case Some(JString(s))  => s
-    case Some(other)  => throw new IllegalArgumentException(s"Param '$key' must be a string, got: $other")
+    case Some(JString(s)) => s
+    case Some(other) => throw new IllegalArgumentException(s"Param '$key' must be a string, got: $other")
   }
 
-  /** Present, non-null value for `key`, else None. */
   def opt(key: String): Option[JValue] = (json \ key) match {
     case JNothing | JNull => None
-    case v                => Some(v)
+    case v => Some(v)
   }
 
   private def required(key: String): JValue =
