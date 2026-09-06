@@ -15,7 +15,7 @@ import org.log4s.getLogger
  *  `pamae` and `clara` differ by exactly one phase — a controlled experiment, not two unrelated
  *  implementations. See `docs/kmedoids_docs.md`.
  *
- *  @param inner       driver-local solver used inside phase I (`pam` | `fastpam` | `fasterpam`)
+ *  @param inner       driver-local solver used inside phase I (`fastpam` | `fasterpam`)
  *  @param refineIters phase-II iterations; the paper uses 1
  *  @param poolSize    phase-II candidate pool — the accuracy-vs-cost knob
  */
@@ -26,7 +26,7 @@ class PAMAE(
   val maxIter: Int = 100,
   val refineIters: Int = 1,
   val poolSize: Int = 2000,
-  val inner: String = "pam",
+  val inner: String = "fastpam",
   val distance: DistanceMetric = EuclideanDistance,
   val seed: Long = 42L
 ) extends Clusterer {
@@ -41,7 +41,6 @@ class PAMAE(
     // Phase I — parallel seeding; its full-data cost comes back from CLARA's batched evaluation.
     val seeding = new CLARA(k, numSamples, sampleSize, maxIter, distance, inner, seed).seedMedoids(data)
 
-    // Phase II — parallel refinement over the entire data.
     val candidatePool = MedoidRefinement.sampleCandidatePool(points, seeding.rowCount, poolSize, seed)
     val refined = MedoidRefinement.refine(
       Weights.toRdd(points), seeding.model.medoids, candidatePool, distance, refineIters)

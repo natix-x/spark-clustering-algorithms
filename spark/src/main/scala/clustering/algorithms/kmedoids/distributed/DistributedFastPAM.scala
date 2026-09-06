@@ -31,7 +31,10 @@ class DistributedFastPAM(
     val candidates = points.map(_._1).collect()
     require(candidates.length >= k,
       s"Dataset too small: n=${candidates.length} points but k=$k medoids requested.")
-    val broadcastCandidates = points.sparkContext.broadcast(candidates)
+    // Broadcast RAW COORDINATES: the folds below run n·(m + k) distance computations per round,
+    // so unpacking per comparison is the one thing that must not happen. `candidates` itself stays
+    // vector-typed — it is what the model returns.
+    val broadcastCandidates = points.sparkContext.broadcast(candidates.map(_.toArray))
 
     val medoids  = buildPhase(points, broadcastCandidates)
     val isMedoid = new Array[Boolean](candidates.length)
@@ -52,7 +55,7 @@ class DistributedFastPAM(
   /** Greedy BUILD, one distributed job per medoid. */
   private def buildPhase(
     points:              RDD[(Vector, Double)],
-    broadcastCandidates: Broadcast[Array[Vector]]
+    broadcastCandidates: Broadcast[Array[Array[Double]]]
   ): Array[Int] = {
     val candidateCount = broadcastCandidates.value.length
     val medoids        = new Array[Int](k)
@@ -62,7 +65,8 @@ class DistributedFastPAM(
     // First medoid: minimise Σ_j w_j·d(candidate, j).
     val totalDistances = PartitionAggregator.aggregateDoubles(points, candidateCount) {
       (totals, pointAndWeight) =>
-        val (point, weight) = pointAndWeight
+        val (pointVector, weight) = pointAndWeight
+        val point           = pointVector.toArray
         val candidates      = broadcastCandidates.value
         var candidate = 0
         while (candidate < candidateCount) {
@@ -80,7 +84,8 @@ class DistributedFastPAM(
         points.sparkContext.broadcast(medoids.take(selectedCount).map(broadcastCandidates.value))
       val gains = PartitionAggregator.aggregateDoubles(points, candidateCount) {
         (totals, pointAndWeight) =>
-          val (point, weight) = pointAndWeight
+          val (pointVector, weight) = pointAndWeight
+          val point           = pointVector.toArray
           val candidates      = broadcastCandidates.value
           val selected        = broadcastSelected.value
           var distanceToNearestMedoid = Double.MaxValue
@@ -108,27 +113,28 @@ class DistributedFastPAM(
   /** One distributed FastPAM1 SWAP round. Mutates `medoids`/`isMedoid` in place when an improving
    *  swap is found; returns whether one was applied. */
   private def applyBestSwap(
-    points:              RDD[(Vector, Double)],
-    broadcastCandidates: Broadcast[Array[Vector]],
-    medoids:             Array[Int],
-    isMedoid:            Array[Boolean]
+    points: RDD[(Vector, Double)],
+    broadcastCandidates: Broadcast[Array[Array[Double]]],
+    medoids: Array[Int],
+    isMedoid: Array[Boolean]
   ): Boolean = {
-    val candidateCount   = broadcastCandidates.value.length
-    val slotCount        = k
-    val metric           = distance
+    val candidateCount = broadcastCandidates.value.length
+    val slotCount = k
+    val metric = distance
     val broadcastMedoids = points.sparkContext.broadcast(medoids.map(broadcastCandidates.value))
 
     // terms(candidate)                                = shared(candidate)
     // terms(candidateCount + candidate*k + slot)      = removeLoss(candidate)(slot)
     val terms = PartitionAggregator.aggregateDoubles(points, candidateCount + candidateCount * slotCount) {
       (accumulator, pointAndWeight) =>
-        val (point, weight) = pointAndWeight
-        val candidates      = broadcastCandidates.value
-        val medoidPoints    = broadcastMedoids.value
+        val (pointVector, weight) = pointAndWeight
+        val point = pointVector.toArray
+        val candidates = broadcastCandidates.value
+        val medoidPoints = broadcastMedoids.value
 
-        var nearest       = Double.MaxValue
+        var nearest = Double.MaxValue
         var secondNearest = Double.MaxValue
-        var nearestSlot   = -1
+        var nearestSlot = -1
         var slot = 0
         while (slot < slotCount) {
           val d = metric.compute(medoidPoints(slot), point)

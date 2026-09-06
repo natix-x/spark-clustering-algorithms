@@ -26,36 +26,36 @@ private[kmedoids] object MedoidRefinement {
   final case class Result(medoids: Array[Vector], cost: Double, iterations: Int)
 
   def refine(
-    points:         RDD[(Vector, Double)],
+    points: RDD[(Vector, Double)],
     initialMedoids: Array[Vector],
-    candidatePool:  Array[Vector],
-    distance:       DistanceMetric,
-    maxIterations:  Int
+    candidatePool: Array[Vector],
+    distance:DistanceMetric,
+    maxIterations: Int
   ): Result = {
-    val sc        = points.sparkContext
+    val sc = points.sparkContext
     val slotCount = initialMedoids.length
 
-    var medoids   = initialMedoids
-    var cost      = Double.MaxValue
+    var medoids = initialMedoids
+    var cost = Double.MaxValue
     var iteration = 0
     var improved  = true
 
     while (improved && iteration < maxIterations) {
       // Incumbents are always candidates — that is what makes the objective non-increasing.
-      val candidates    = candidatePool ++ medoids
-      val slotMajor     = groupCandidatesBySlot(candidates, medoids, distance)
+      val candidates = candidatePool ++ medoids
+      val slotMajor = groupCandidatesBySlot(candidates, medoids, distance)
       val slotCandidates = slotMajor.candidates
-      val slotBounds     = slotMajor.bounds
+      val slotBounds = slotMajor.bounds
 
       // One distributed pass: each point scores only the candidates of ITS OWN slot.
       val broadcastCandidates = sc.broadcast(slotCandidates)
-      val broadcastMedoids    = sc.broadcast(medoids)
-      val broadcastBounds     = sc.broadcast(slotBounds)
-      val metric              = distance
+      val broadcastMedoids = sc.broadcast(medoids)
+      val broadcastBounds = sc.broadcast(slotBounds)
+      val metric = distance
       val candidateCosts = PartitionAggregator.aggregateDoubles(points, slotCandidates.length) {
         (costs, pointAndWeight) =>
           val (point, weight) = pointAndWeight
-          val slot            = NearestPrototypeModel.nearest(point, broadcastMedoids.value, metric)
+          val slot = NearestPrototypeModel.nearest(point, broadcastMedoids.value, metric)
           val candidatesOfSlot = broadcastCandidates.value
           var index = broadcastBounds.value(slot)
           val end   = broadcastBounds.value(slot + 1)
@@ -67,19 +67,19 @@ private[kmedoids] object MedoidRefinement {
       broadcastCandidates.destroy(); broadcastMedoids.destroy(); broadcastBounds.destroy()
 
       val nextMedoids = new Array[Vector](slotCount)
-      var nextCost    = 0.0
-      var slot        = 0
+      var nextCost = 0.0
+      var slot = 0
       while (slot < slotCount) {
         val best = bestCandidateOfSlot(slot, slotCandidates, slotBounds, candidateCosts, medoids)
         nextMedoids(slot) = best._1
-        nextCost         += best._2      // an empty slot contributes 0 and keeps its medoid
+        nextCost += best._2      // an empty slot contributes 0 and keeps its medoid
         slot += 1
       }
 
       // `nextCost` is the objective of `nextMedoids` under the CURRENT assignment; reassigning in
       // the next iteration can only lower it, so the sequence is non-increasing.
       improved = !nextMedoids.sameElements(medoids) && nextCost < cost
-      cost     = math.min(cost, nextCost)
+      cost = math.min(cost, nextCost)
       if (improved) medoids = nextMedoids
       iteration += 1
     }
@@ -93,11 +93,11 @@ private[kmedoids] object MedoidRefinement {
 
   private def groupCandidatesBySlot(
     candidates: Array[Vector],
-    medoids:    Array[Vector],
-    distance:   DistanceMetric
+    medoids: Array[Vector],
+    distance: DistanceMetric
   ): SlotMajorCandidates = {
     val perSlot = Array.fill(medoids.length)(List.newBuilder[Vector])
-    var index   = 0
+    var index = 0
     while (index < candidates.length) {
       perSlot(NearestPrototypeModel.nearest(candidates(index), medoids, distance)) += candidates(index)
       index += 1
@@ -110,18 +110,18 @@ private[kmedoids] object MedoidRefinement {
    *  incumbent is normally in its own slot (distance 0 to itself) because it was appended to the
    *  pool; the search starts from it. */
   private def bestCandidateOfSlot(
-    slot:           Int,
+    slot: Int,
     slotCandidates: Array[Vector],
-    slotBounds:     Array[Int],
+    slotBounds: Array[Int],
     candidateCosts: Array[Double],
-    medoids:        Array[Vector]
+    medoids: Array[Vector]
   ): (Vector, Double) = {
-    val from  = slotBounds(slot)
+    val from = slotBounds(slot)
     val until = slotBounds(slot + 1)
 
     var bestIndex = -1
-    var bestCost  = 0.0
-    var index     = from
+    var bestCost = 0.0
+    var index = from
     while (index < until) {
       if (slotCandidates(index) == medoids(slot)) { bestIndex = index; bestCost = candidateCosts(index) }
       index += 1
@@ -130,7 +130,7 @@ private[kmedoids] object MedoidRefinement {
     while (index < until) {
       if (bestIndex < 0 || candidateCosts(index) < bestCost) {
         bestIndex = index
-        bestCost  = candidateCosts(index)
+        bestCost = candidateCosts(index)
       }
       index += 1
     }
@@ -139,12 +139,21 @@ private[kmedoids] object MedoidRefinement {
   }
 
   /** Uniformly sampled candidate pool, collected once and reused by every iteration. Sampling is
-   *  uniform over ROWS, not weight — candidates only need to cover the space. */
+   *  uniform over ROWS, not weight — candidates only need to cover the space.
+   *
+   *  Uniform over the WHOLE dataset, which is the point: this pool is the set the refinement is
+   *  allowed to choose representatives from, so a pool drawn from one region of an ordered input
+   *  would quietly restrict the phase that exists precisely to see all of the data. Hence the
+   *  over-draw and the shuffle in [[DriverSample]] rather than a `take` on the sampled frame. */
   def sampleCandidatePool(data: DataFrame, rowCount: Long, poolSize: Int, seed: Long): Array[Vector] = {
     val features = data.select(col(Columns.Features))
-    (if (poolSize >= rowCount) features.collect()
-     else features
-       .sample(withReplacement = false, fraction = math.min(1.0, 2.0 * poolSize / rowCount), seed = seed)
-       .take(poolSize)).map(_.getAs[Vector](Columns.Features))
+    val drawn =
+      if (poolSize >= rowCount) features.collect()
+      else features
+        .sample(withReplacement = false,
+                fraction = DriverSample.inclusionProbability(poolSize, rowCount),
+                seed = seed)
+        .collect()
+    DriverSample.takeRandom(drawn, poolSize, seed).map(_.getAs[Vector](Columns.Features))
   }
 }

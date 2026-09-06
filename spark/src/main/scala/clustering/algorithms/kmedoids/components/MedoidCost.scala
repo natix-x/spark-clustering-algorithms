@@ -3,6 +3,7 @@ package clustering.algorithms.kmedoids.components
 import clustering.algorithms.kmedoids.hybrid.CLARA
 import clustering.core.{Columns, Weights}
 import clustering.distance.DistanceMetric
+import clustering.utils.PartitionAggregator
 import org.apache.spark.ml.linalg.Vector
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.functions._
@@ -17,34 +18,50 @@ private[kmedoids] object MedoidCost {
   /** Cost of SEVERAL medoid sets in ONE pass — one `sum` aggregate per set over the same scan, so
    *  [[CLARA]] scores all its candidates with a single job. */
   def perMedoidSet(
-    data:       DataFrame,
+    data: DataFrame,
     medoidSets: Array[Array[Vector]],
-    distance:   DistanceMetric
+    distance: DistanceMetric
   ): Array[Double] = {
     require(medoidSets.nonEmpty, "perMedoidSet: at least one medoid set is required")
 
-    val broadcastSets = data.sparkSession.sparkContext.broadcast(medoidSets)
-    val metric        = distance
+    // Broadcast raw coordinates: unpacked once here, so the per-row scan never dereferences a
+    // wrapper, and `distanceUpTo` against the running minimum lets each candidate's coordinate
+    // loop quit as soon as it cannot win — the Euclidean metric then pays `sqrt` per HIT, not
+    // per comparison.
+    val broadcastSets = data.sparkSession.sparkContext.broadcast(medoidSets.map(_.map(_.toArray)))
+    val metric = distance
 
-    val costColumns = medoidSets.indices.map { setIndex =>
-      val nearestDistance = udf { features: Vector =>
-        val medoids = broadcastSets.value(setIndex)
-        var nearest = Double.MaxValue
-        var slot    = 0
-        while (slot < medoids.length) {
-          val d = metric.compute(features, medoids(slot))
-          if (d < nearest) nearest = d
-          slot += 1
+    // ONE ordered fold over the data, accumulating all S set costs at once. The DataFrame form
+    // this replaces built S separate UDF columns, so every row paid the VectorUDT round-trip and
+    // `toArray` S TIMES — the same per-row overhead Lloyd's rewrite removed (measured 5.3× there,
+    // 5.09.2026), multiplied by the number of candidate sets. Here the coordinates are unpacked
+    // once and the S scans share them.
+    //
+    // Ordered merge, S doubles: these costs pick CLARA's winning sample, so two runs of one
+    // configuration must not disagree in the last bits and then choose differently.
+    val costs = PartitionAggregator.aggregateDoublesOrdered(
+      Weights.toRdd(data), medoidSets.length) { (acc, row) =>
+        val point = row._1.toArray
+        val w     = row._2
+        val sets  = broadcastSets.value
+        var setIndex = 0
+        while (setIndex < sets.length) {
+          val medoids = sets(setIndex)
+          var nearest = Double.MaxValue
+          var slot = 0
+          while (slot < medoids.length) {
+            // distanceUpTo against the running minimum: each candidate's coordinate loop quits as
+            // soon as it cannot win, so Euclidean pays `sqrt` per HIT and not per comparison.
+            val d = metric.distanceUpTo(point, medoids(slot), nearest)
+            if (d < nearest) nearest = d
+            slot += 1
+          }
+          acc(setIndex) += w * nearest
+          setIndex += 1
         }
-        nearest
-      }
-      sum(nearestDistance(col(Columns.Features)) * col(Columns.Weight)).as(s"cost$setIndex")
     }
 
-    val row = Weights.withWeights(data).agg(costColumns.head, costColumns.tail: _*).head()
     broadcastSets.unpersist(blocking = false)
-
-    // `sum` over an empty dataset is null.
-    Array.tabulate(medoidSets.length)(i => if (row.isNullAt(i)) 0.0 else row.getDouble(i))
+    costs
   }
 }
