@@ -7,8 +7,8 @@ import clustering.distance.DistanceMetric
 import org.apache.spark.ml.linalg.Vector
 import org.apache.spark.sql.DataFrame
 
-/** A k-medoids solver that keeps the O(n²) distance matrix in DRIVER memory ([[PAM]],
- *  [[FastPAM]], [[FasterPAM]]).
+/** A k-medoids solver that keeps the O(n²) distance matrix in DRIVER memory ([[FastPAM]],
+ *  [[FasterPAM]]).
  *
  *  `fitLocal` is the real entry point: [[CLARA]] and [[PAMAE]] run it on collected samples, which
  *  makes the exact solver a knob of the sampling methods (Schubert & Rousseeuw 2021 improve
@@ -33,13 +33,17 @@ private[kmedoids] trait DriverLocalKMedoids extends Clusterer {
 
 private[kmedoids] object DriverLocalKMedoids {
 
-  /** Resolves an `inner` param value to a driver-local solver. */
+  /** Resolves an `inner` param value to a driver-local solver.
+   *
+   *  There is no `pam` entry: FastPAM1 searches identically to PAM and returns the identical
+   *  medoids (Schubert & Rousseeuw 2021 present it as a pure O(k) runtime optimisation, not an
+   *  approximation), so the exhaustive rung carried no information the fast one does not, at k²
+   *  the cost. `fastpam` IS the exact baseline. */
   def fromName(name: String, k: Int, maxIter: Int, distance: DistanceMetric, seed: Long): DriverLocalKMedoids =
     name.toLowerCase match {
-      case "pam" => new PAM(k, maxIter, distance)
       case "fastpam" => new FastPAM(k, maxIter, distance)
       case "fasterpam" => new FasterPAM(k, maxIter, distance, seed)
       case other       => throw new IllegalArgumentException(
-        s"Unknown inner k-medoids solver: '$other'. Known: fastpam, fasterpam, pam")
+        s"Unknown inner k-medoids solver: '$other'. Known: fastpam, fasterpam")
     }
 }

@@ -3,19 +3,23 @@ package clustering.algorithms.kmedoids.local
 import clustering.algorithms.kmedoids.components._
 import clustering.algorithms.kmedoids.KMedoidsModel
 import clustering.distance.{DistanceMetric, EuclideanDistance}
-import clustering.utils.DriverParallelism
 import org.apache.spark.ml.linalg.Vector
 
-/** FastPAM1 (Schubert & Rousseeuw 2019) — same search as [[PAM]] (one best swap per iteration),
- *  but a candidate's Δ for ALL k slots comes from ONE O(n) pass over the points
- *  ([[SwapDeltas]]) instead of a configuration-cost recomputation per (slot, candidate) pair.
+/** FastPAM1 (Schubert & Rousseeuw 2019) — the EXACT rung of the ladder.
  *
- *  Driver-local like [[PAM]]; the candidate scan runs on the driver's cores.
+ *  It performs the same search as the original PAM (Kaufman & Rousseeuw 1990): one best swap per
+ *  iteration, over all (slot, candidate) pairs. The O(k) gain is purely in how a candidate is
+ *  scored — ONE O(n) pass yields its Δ for ALL k slots at once ([[SwapDeltas]]), instead of an
+ *  evaluation per pair — so the paper presents it as a runtime optimisation that returns the
+ *  IDENTICAL medoids, not an approximation. That is why no separate exhaustive `pam` entry
+ *  exists here: it would produce the same answer for a further factor k.
+ *
+ *  Driver-local; the candidate scan runs on the driver's cores.
  *  See `docs/kmedoids_docs.md`.
  */
 class FastPAM(
-  val k:        Int,
-  val maxIter:  Int            = 100,
+  val k: Int,
+  val maxIter: Int = 100,
   val distance: DistanceMetric = EuclideanDistance
 ) extends DriverLocalKMedoids {
 
@@ -25,11 +29,11 @@ class FastPAM(
     require(weights.length == pointCount, s"weights (${weights.length}) must match points ($pointCount)")
 
     val distances = DistanceMatrix.pairwise(points, distance)
-    var medoids   = MedoidBuildPhase.selectInitialMedoids(distances, k, weights)
-    val cache     = new NearestMedoidCache(pointCount)
+    var medoids = MedoidBuildPhase.selectInitialMedoids(distances, k, weights)
+    val cache= new NearestMedoidCache(pointCount)
 
     var iteration = 0
-    var improved  = true
+    var improved = true
     while (improved && iteration < maxIter) {
       cache.refresh(distances, medoids)
       val move = bestSwap(distances, medoids, weights, cache)
@@ -54,21 +58,18 @@ class FastPAM(
     val isMedoid = new Array[Boolean](distances.pointCount)
     medoids.foreach(m => isMedoid(m) = true)
 
-    // One O(n) Δ pass per candidate.
-    DriverParallelism
-      .sliceRangesForWork(distances.pointCount, distances.pointCount.toLong)
-      .par.map { case (from, until) =>
-      val deltasBySlot = new Array[Double](k)   // one scratch buffer per slice, never shared
-      var best         = SwapMove.None
-      var candidate    = from
-      while (candidate < until) {
-        if (!isMedoid(candidate)) {
-          best = SwapMove.preferred(best,
-            SwapDeltas.bestMoveForCandidate(distances, candidate, weights, cache, deltasBySlot))
-        }
-        candidate += 1
+    // One O(n) Δ pass per candidate, ascending, so `preferred` sees candidates in index order and
+    // the tie rule resolves to the lowest index.
+    val deltasBySlot = new Array[Double](k)   // reused across candidates: the scan allocates nothing
+    var best = SwapMove.None
+    var candidate = 0
+    while (candidate < distances.pointCount) {
+      if (!isMedoid(candidate)) {
+        best = SwapMove.preferred(best,
+          SwapDeltas.bestMoveForCandidate(distances, candidate, weights, cache, deltasBySlot))
       }
-      best
-    }.seq.reduce(SwapMove.preferred)
+      candidate += 1
+    }
+    best
   }
 }
