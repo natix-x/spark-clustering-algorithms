@@ -5,7 +5,6 @@ import clustering.distance.DistanceMetric
 import org.apache.spark.ml.linalg.Vector
 
 
-/** A fitted k-means model: each point is labelled with its nearest centroid. */
 class KMeansModel(
   centroidsArg: Array[Vector],
   distanceArg:  DistanceMetric

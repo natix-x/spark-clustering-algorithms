@@ -2,9 +2,8 @@ package clustering.algorithms.kmeans
 
 import clustering.core.{Columns, Geometry, NearestPrototypeModel, Weights}
 import clustering.distance.DistanceMetric
-import clustering.utils.Convergence
-import org.apache.spark.ml.linalg.Vector
-import org.apache.spark.ml.stat.Summarizer
+import clustering.utils.{Convergence, PartitionAggregator}
+import org.apache.spark.ml.linalg.{Vector, Vectors}
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.functions._
 import org.apache.spark.storage.StorageLevel
@@ -38,10 +37,10 @@ private[kmeans] object LloydKMeans {
   }
 
   def initialize(
-    data:         DataFrame,
-    geometry:     Geometry,
-    k:            Int,
-    seed:         Long,
+    data: DataFrame,
+    geometry: Geometry,
+    k: Int,
+    seed: Long,
     storageLevel: StorageLevel
   ): LloydContext = {
     val fitDistance = geometry.fitDistance
@@ -61,12 +60,12 @@ private[kmeans] object LloydKMeans {
   }
 
   def run(
-     points:   DataFrame,
-     initialCentroids:  Array[Vector],
+     points: DataFrame,
+     initialCentroids: Array[Vector],
      fitDistance: DistanceMetric,
      geometry: Geometry,
-     maxIter:  Int,
-     eps:      Double
+     maxIter: Int,
+     eps: Double
   ): Array[Vector] = {
     require(initialCentroids.nonEmpty, "Lloyd.run: initial centroids must not be empty")
     val sc = points.sparkSession.sparkContext
@@ -76,35 +75,62 @@ private[kmeans] object LloydKMeans {
     var iteration = 0
     var hasConverged = false
 
-    while (!hasConverged && iteration < maxIter) {
-      val bc   = sc.broadcast(centroids)
-      val dist = fitDistance
-      val assignUDF = udf { features: Vector =>
-        NearestPrototypeModel.nearest(features, bc.value, dist)
-      }
+    // ONE RDD fold per iteration instead of assign-UDF + groupBy/agg. This is the exception
+    // rule 3(b) of the project's Spark idioms allows — "a reduction into a long array through an
+    // opaque UDF" — and Lloyd is exactly that: the distance loop is opaque to Catalyst either
+    // way, so the DataFrame form buys no codegen while paying a VectorUDT round-trip and a
+    // vector allocation PER ROW PER ITERATION, plus a shuffle to group k keys that partial
+    // aggregation has already reduced to k rows per partition.
+    //
+    // The accumulator is cluster-major, d sums followed by the mass: layout k*(d+1), which is
+    // small (k=10, d=8 -> 90 doubles) and travels once per partition, not once per row.
+    val rdd = Weights.toRdd(points)
+    val dim = initialCentroids.head.size
+    val accLength = kk * (dim + 1)
 
-      // Weighted mean: a point of weight w counts as w points, so a coreset yields the centroid
-      // of the data it stands for. Summarizer supports weights natively.
-      val newCentroidsByCluster: Map[Int, Vector] = points
-        .withColumn("clusterId", assignUDF(col(Columns.Features)))
-        .groupBy("clusterId")
-        .agg(Summarizer.mean(col(Columns.Features), col(Columns.Weight)).as("newCentroid"))
-        .collect()
-        .map(r => r.getInt(0) -> r.getAs[Vector]("newCentroid"))
-        .toMap
+    while (!hasConverged && iteration < maxIter) {
+      // Broadcast raw coordinates, not vectors: unpacked ONCE per round on the driver, so the
+      // per-row scan runs the array kernel with its shrinking-bound early exit instead of
+      // dereferencing a wrapper and re-dispatching on the vector's type at every comparison.
+      val bc   = sc.broadcast(centroids.map(_.toArray))
+      val dist = fitDistance
+
+      // ORDERED merge: Lloyd's centroids ARE the sums, so a task-completion-order merge would
+      // make two runs of one configuration differ in the last bits — losing the reproducibility
+      // the thesis reports as a Spark-side result. The accumulator is k*(d+1) doubles per
+      // partition, so ordering it costs nothing here (see PartitionAggregator).
+      val acc = PartitionAggregator.aggregateDoublesOrdered(rdd, accLength) { (arr, row) =>
+        // `toArray` is the vector's OWN array when dense — one field read per row, no copy.
+        val coords = row._1.toArray
+        val w      = row._2
+        val c      = NearestPrototypeModel.nearestRaw(coords, bc.value, dist)
+        val base   = c * (dim + 1)
+        var i = 0
+        while (i < dim) { arr(base + i) += w * coords(i); i += 1 }
+        arr(base + dim) += w
+      }
 
       bc.unpersist()
 
+      // Weighted mean: a point of weight w counts as w points, so a coreset yields the centroid
+      // of the data it stands for. Guarded on MASS, not on row count: a cell can hold rows whose
+      // weights are all zero, and dividing by that would produce NaN centroids that then swallow
+      // every point. Same guard as the Flink side's RoundStats.means.
       val newCentroids = Array.tabulate(kk) { i =>
-        newCentroidsByCluster.get(i) match {
-          case Some(newCentroid) => geometry.project(newCentroid)
-          case None              => centroids(i) // fallback for empty clusters
+        val base = i * (dim + 1)
+        val mass = acc(base + dim)
+        if (mass == 0.0) centroids(i)   // fallback for empty clusters
+        else {
+          val mean = new Array[Double](dim)
+          var j = 0
+          while (j < dim) { mean(j) = acc(base + j) / mass; j += 1 }
+          geometry.project(Vectors.dense(mean))
         }
       }
 
       hasConverged = Convergence.hasConverged(centroids, newCentroids, eps, fitDistance)
-      centroids    = newCentroids
-      iteration   += 1
+      centroids = newCentroids
+      iteration += 1
     }
 
     centroids

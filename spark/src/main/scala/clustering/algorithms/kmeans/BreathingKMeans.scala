@@ -1,6 +1,7 @@
 package clustering.algorithms.kmeans
 
-import clustering.core.{Clusterer, Columns, EuclideanGeometry, Geometry}
+import clustering.core.{Clusterer, EuclideanGeometry, Geometry, Weights}
+import clustering.utils.PartitionAggregator
 import clustering.distance.DistanceMetric
 import org.apache.spark.ml.linalg.{Vector, Vectors}
 import org.apache.spark.sql.DataFrame
@@ -57,11 +58,15 @@ class BreathingKMeans(
       // ── breathe in ────────────────────────────────────────────────────────────────
       val centroidStatistics = calculateCentroidStats(setup.preparedPoints, bestCentroids, setup.fitDistance)
       val totalMass = centroidStatistics.map(_.mass).sum
-      val rmse = if (totalMass > 0.0) math.sqrt(centroidStatistics.map(_.error).sum / totalMass) else 0.0
+      // Scale of the insertion offset: a typical DISTANCE, so the mean cost has to be mapped
+      // back through the geometry (euclidean = RMSE; spherical = mean 1 − cos, already a
+      // distance). Taking sqrt unconditionally would offset by the square root of a distance.
+      val offsetScale =
+        if (totalMass > 0.0) geometry.costToDistance(centroidStatistics.map(_.error).sum / totalMass) else 0.0
       // At most one new centroid per existing centroid, so the breath is capped at |C| — with
       // k < m0 (e.g. k = 1) fewer than m centroids actually get inserted.
       val highestErrorCentroidsIndices = centroidStatistics.zipWithIndex.sortBy { case (s, i) => (-s.error, i) }.take(currentM).map(_._2)
-      val newCentroids = highestErrorCentroidsIndices.map(i => generateOffset(bestCentroids(i), rmse, random))
+      val newCentroids = highestErrorCentroidsIndices.map(i => generateOffset(bestCentroids(i), offsetScale, random))
 
       val expandedCentroids = LloydKMeans.run(setup.preparedPoints, bestCentroids ++ newCentroids, setup.fitDistance, geometry, maxIter, eps)
 
@@ -97,14 +102,15 @@ class BreathingKMeans(
     new KMeansModel(bestCentroids, geometry.modelDistance)
   }
 
-  /** `c + ε · RMSE · u`, u uniform in the unit hypercube centred at the origin. The result is
+  /** `c + ε · scale · u`, u uniform in the unit hypercube centred at the origin, `scale` the
+   *  geometry's typical distance (Fritzke's RMSE under euclidean). The result is
    *  projected onto the geometry, so on the unit sphere the inserted centroid stays a unit vector. */
-  private def generateOffset(centroid: Vector, rmse: Double, random: Random): Vector = {
+  private def generateOffset(centroid: Vector, scale: Double, random: Random): Vector = {
     val coordinates = centroid.toArray
     val perturbedCoordinates = new Array[Double](coordinates.length)
     var i = 0
     while (i < coordinates.length) {
-      perturbedCoordinates(i) = coordinates(i) + epsilon * rmse * (random.nextDouble() - 0.5)
+      perturbedCoordinates(i) = coordinates(i) + epsilon * scale * (random.nextDouble() - 0.5)
       i += 1
     }
     geometry.project(Vectors.dense(perturbedCoordinates))
@@ -150,7 +156,12 @@ class BreathingKMeans(
     if (nearestIndex >= 0) Some(nearestIndex) else None
   }
 
-  /** φ(C, X) = Σ_x w · d(x, nearest centroid)² — the objective breathing minimises. */
+  /** φ(C, X) = Σ_x w · φ(d(x, nearest centroid)) — the objective breathing minimises, with the
+   *  per-point term taken from [[Geometry.pointCost]] instead of being squared unconditionally.
+   *  Fritzke writes d² because he works in Euclidean space, where that IS the objective; under
+   *  `geometry: spherical` the wrapped Lloyd loop optimises Σ w·(1 − cos) instead, and breathing
+   *  has to breathe on the same functional it is wrapped around — otherwise it would insert and
+   *  delete centroids by a ranking the iteration does not agree with. */
   private def computeTotalError(points: DataFrame, centroids: Array[Vector], metric: DistanceMetric): Double =
     calculateCentroidStats(points, centroids, metric).map(_.error).sum
 
@@ -159,10 +170,12 @@ class BreathingKMeans(
    *  For every point: `d1` is the distance to its nearest centroid, `d2` to its second nearest.
    *  Then, per centroid i with Voronoi set C_i (Fritzke's notation, weighted here):
    *    - `mass`  = Σ_{x∈C_i} w                    — how much data the centroid holds
-   *    - `error` = Σ_{x∈C_i} w · d1²              — φ(c_i), the breathe-in criterion
-   *    - `utility` = Σ_{x∈C_i} w · (d2² − d1²)    — U(c_i) = φ(C∖{c_i}) − φ(C), the breathe-out
+   *    - `error` = Σ_{x∈C_i} w · φ(d1)            — φ(c_i), the breathe-in criterion
+   *    - `utility` = Σ_{x∈C_i} w · (φ(d2) − φ(d1)) — U(c_i) = φ(C∖{c_i}) − φ(C), the breathe-out
    *      criterion: exactly the error increase caused by deleting c_i, since its points would
-   *      fall back on their second-nearest centroid.
+   *      fall back on their second-nearest centroid. Note this stays exact under EITHER geometry
+   *      precisely because both terms use the same φ — it is a difference of the objective with
+   *      and without c_i, so whichever functional the loop minimises is the one differenced.
    *
    *  Breathing-only, hence private here rather than in [[LloydKMeans]] — no other centroid-based
    *  algorithm in this package needs it.
@@ -173,18 +186,24 @@ class BreathingKMeans(
     distance: DistanceMetric
   ): Array[BreathingKMeans.Stats] = {
     val sc = points.sparkSession.sparkContext
-    val broadcastCentroids = sc.broadcast(centroids)
+    // Broadcast raw coordinates, not vectors: unpacked ONCE per round on the driver, so the
+    // per-row scan runs the array kernel with distanceUpTo's shrinking-bound early exit instead
+    // of dereferencing a wrapper and re-dispatching on the vector's type at every comparison —
+    // same reasoning as LloydKMeans's assignment broadcast.
+    val broadcastCentroids = sc.broadcast(centroids.map(_.toArray))
     val dist = distance
+    val geom = geometry // local val: the UDF must not capture the enclosing clusterer
 
-    // (nearest index, d1², d2²) per point; d2 = +inf when there is a single centroid.
+    // (nearest index, φ(d1), φ(d2)) per point; d2 falls back to d1 when there is a single centroid.
     val calculatePointDistancesUDF = udf { features: Vector =>
+      val coords = features.toArray
       val currentCentroids = broadcastCentroids.value
       var nearestIndex = 0
       var nearestDistance = Double.MaxValue
       var secondNearestDistance = Double.MaxValue
       var i = 0
       while (i < currentCentroids.length) {
-        val d = dist.compute(features, currentCentroids(i))
+        val d = dist.compute(coords, currentCentroids(i))
         if (d < nearestDistance) {
           secondNearestDistance = nearestDistance;
           nearestDistance = d;
@@ -195,36 +214,68 @@ class BreathingKMeans(
         }
         i += 1
       }
-      val secondNearestSq =
-        if (secondNearestDistance == Double.MaxValue) nearestDistance * nearestDistance
-        else secondNearestDistance * secondNearestDistance
-      (nearestIndex, nearestDistance * nearestDistance, secondNearestSq)
+      val secondNearestCost =
+        if (secondNearestDistance == Double.MaxValue) geom.pointCost(nearestDistance)
+        else geom.pointCost(secondNearestDistance)
+      (nearestIndex, geom.pointCost(nearestDistance), secondNearestCost)
     }
 
-    val aggregatedData = points
-      .select(calculatePointDistancesUDF(col(Columns.Features)).as("s"), col(Columns.Weight))
-      .select(
-        col("s._1").as("centroid"),
-        (col(Columns.Weight) * col("s._2")).as("error"),
-        (col(Columns.Weight) * (col("s._3") - col("s._2"))).as("utility"),
-        col(Columns.Weight).as("mass"))
-      .groupBy("centroid")
-      .agg(sum("mass").as("mass"), sum("error").as("error"), sum("utility").as("utility"))
-      .collect()
+    // ONE ordered fold instead of struct-select + groupBy + three sums. Same shape as Lloyd's
+    // (measured 5.3x there, 5.09.2026): the per-row work is an opaque distance loop either way,
+    // so Catalyst has nothing to optimise and the DataFrame form only adds a VectorUDT round-trip
+    // per row plus a shuffle to group k keys. Accumulator is centroid-major, three slots each
+    // (mass, error, utility) — k*3 doubles, so ORDERED merging costs nothing and buys back the
+    // reproducibility that task-completion order would spend. It matters more here than in Lloyd:
+    // these sums decide WHICH centroid breathing deletes, so a last-bit difference is not a
+    // rounding detail, it can change the tree of decisions.
+    val acc = PartitionAggregator.aggregateDoublesOrdered(Weights.toRdd(points), centroids.length * 3) {
+      (arr, row) =>
+        val coords = row._1.toArray
+        val w      = row._2
+        val cs     = broadcastCentroids.value
+
+        var nearestIndex = 0
+        var nearestDistance = Double.MaxValue
+        var secondNearestDistance = Double.MaxValue
+        var i = 0
+        while (i < cs.length) {
+          // Plain compute(), not distanceUpTo against the shrinking d2 — measured 5.09.2026 to
+          // REGRESS on a top-2 scan at every k >= 32; see CentroidIteration.PartialAssign on the
+          // Flink side for the same finding and the reason (d2 is nothing like a small fixed ε).
+          val d = dist.compute(coords, cs(i))
+          if (d < nearestDistance) {
+            secondNearestDistance = nearestDistance
+            nearestDistance = d
+            nearestIndex = i
+          } else if (d < secondNearestDistance) {
+            secondNearestDistance = d
+          }
+          i += 1
+        }
+        val errorCost = geom.pointCost(nearestDistance)
+        val secondCost =
+          if (secondNearestDistance == Double.MaxValue) errorCost
+          else geom.pointCost(secondNearestDistance)
+
+        val base = nearestIndex * 3
+        arr(base)     += w                              // mass
+        arr(base + 1) += w * errorCost                  // error   = Σ w·φ(d1)
+        arr(base + 2) += w * (secondCost - errorCost)   // utility = Σ w·(φ(d2) − φ(d1))
+    }
 
     broadcastCentroids.unpersist(blocking = false)
 
-    val metricsArray = Array.fill(centroids.length)(BreathingKMeans.Stats(0.0, 0.0, 0.0))
-    aggregatedData.foreach { r =>
-      metricsArray(r.getInt(0)) = BreathingKMeans.Stats(mass = r.getDouble(1), error = r.getDouble(2), utility = r.getDouble(3))
+    Array.tabulate(centroids.length) { i =>
+      val base = i * 3
+      BreathingKMeans.Stats(mass = acc(base), error = acc(base + 1), utility = acc(base + 2))
     }
-    metricsArray
   }
 }
 
 private object BreathingKMeans {
 
-  /** Per-centroid aggregates: `mass` = Σw, `error` = φ(c) = Σ w·d1², `utility` = U(c) = Σ w·(d2²−d1²). */
+  /** Per-centroid aggregates: `mass` = Σw, `error` = φ(c) = Σ w·φ(d1),
+   *  `utility` = U(c) = Σ w·(φ(d2) − φ(d1)), with φ the geometry's point cost. */
   private final case class Stats(mass: Double, error: Double, utility: Double)
 }
 
