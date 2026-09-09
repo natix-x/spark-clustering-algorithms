@@ -183,9 +183,7 @@ object AlgorithmRegistry {
         minPts = p.int("minPts"),
         // The universal accuracy-vs-cost knob; required, so no run hides which m it used.
         coreSampleFraction = p.double("coreSampleFraction"),
-        samplingStrategy = CandidateSelectionStrategy.fromName(
-          p.stringOpt("sampling", "uniform"), p.intOpt("poolFactor", 4)
-        ),
+        samplingStrategy = CandidateSelectionStrategy.fromName(p.stringOpt("sampling", "uniform")),
         // assign: 'eps' = classic DBSCAN noise semantics, 'closest' = the paper's rule.
         requireWithinEps = assignWithinEps(p.stringOpt("assign", "eps")),
         distanceMetric = distance,
