@@ -56,7 +56,9 @@ class FasterPAM(
             isMedoid(medoids(move.slot)) = false
             medoids(move.slot)           = candidate
             isMedoid(candidate)          = true
-            cache.refresh(distances, medoids)
+            // Incremental update, not a full O(n·k) refresh: only slot move.slot moved, so almost
+            // every point's top-2 is untouched. See NearestMedoidCache.updateAfterSwap.
+            cache.updateAfterSwap(distances, medoids, move.slot)
             improved = true
           }
         }
