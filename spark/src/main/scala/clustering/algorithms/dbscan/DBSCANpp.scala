@@ -7,8 +7,9 @@ import org.apache.spark.sql.DataFrame
 import org.log4s.getLogger
 
 
-/** DBSCAN++ (Jang & Jiang, *Sub-sampled DBSCAN*, ICML 2019). Design rationale, the four steps in
- *  full, and the `dbscanexact` alias: `docs/dbscanpp_docs.md`.
+/** DBSCAN++ (Jang & Jiang, *Sub-sampled DBSCAN*, ICML 2019). Design rationale and the four
+ *  steps in full: `docs/dbscanpp_docs.md`. No separate registry entry for exact classic
+ *  DBSCAN — use `dbscanpp` with `coreSampleFraction: 1.0` (and `sampling: "uniform"`).
  *
  *  @param coreSampleFraction s ∈ (0, 1]; the accuracy-vs-cost knob (m = ⌈s·n⌉)
  *  @param requireWithinEps   `true` = classic DBSCAN noise semantics, `false` = the paper's

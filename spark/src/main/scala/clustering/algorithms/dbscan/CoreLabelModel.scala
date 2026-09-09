@@ -11,10 +11,10 @@ import org.apache.spark.sql.functions.{col, udf}
 /** A fitted density model: labelled core points, plus the rule that labels everything else — step
  *  4 of DBSCAN++. Assignment semantics and rationale: `docs/dbscanpp_docs.md` §5.
  *
- *  @param corePoints        core-point coordinates
+ *  @param corePoints core-point coordinates
  *  @param coreClusterLabels cluster id of each core point; contiguous from 0, numbered by
  *                           ascending smallest candidate index, so independent of partitioning
- *  @param requireWithinEps  `true` (config `assign: eps`) = classic DBSCAN noise semantics.
+ *  @param requireWithinEps `true` (config `assign: eps`) = classic DBSCAN noise semantics.
  *                           `false` (`assign: closest`) = the paper's rule, no noise at all.
  */
 class CoreLabelModel(
@@ -28,7 +28,6 @@ class CoreLabelModel(
   require(corePoints.length == coreClusterLabels.length,
     s"cores (${corePoints.length}) and labels (${coreClusterLabels.length}) must have the same length")
 
-  /** Number of clusters found; 0 when the parameters produced no core point at all. */
   def getNumberOfClusters: Int = if (coreClusterLabels.isEmpty) {
     0
   } else {
