@@ -42,6 +42,40 @@ class GeometrySpec extends AnyFunSuite {
     assert(EuclideanGeometry.project(mean) == mean)
   }
 
+  /** `pointCost` has to be the objective the geometry's own iteration optimises, because every
+   *  criterion layered on the loop ranks by it — bisecting's leaf and trial choice, breathing's
+   *  error and utility. Lloyd minimises Σ d², spherical k-means (Dhillon & Modha) maximises
+   *  Σ cos, i.e. minimises Σ (1 − cos) unsquared. */
+  test("point cost is squared under euclidean and linear under spherical") {
+    assert(EuclideanGeometry.pointCost(3.0) == 9.0)
+    assert(SphericalGeometry.pointCost(0.25) == 0.25)
+  }
+
+  test("costToDistance inverts pointCost, so an offset scale stays a distance") {
+    Seq(0.0, 0.25, 1.0, 7.5).foreach { d =>
+      assert(math.abs(EuclideanGeometry.costToDistance(EuclideanGeometry.pointCost(d)) - d) < 1e-12)
+      assert(math.abs(SphericalGeometry.costToDistance(SphericalGeometry.pointCost(d)) - d) < 1e-12)
+    }
+  }
+
+  /** The identity that makes the spherical choice reproduce Steinbach, Karypis & Kumar's split
+   *  criterion exactly: they score a cluster by average pairwise similarity, which for unit
+   *  vectors is ‖c‖², and Σ (1 − cos) = n(1 − ‖c‖) is monotone in that. The squared form is not,
+   *  which is why `pointCost` is a geometry hook rather than a fixed d². */
+  test("spherical point cost sums to n(1 − ‖c‖) for unit vectors") {
+    val points = Seq(
+      Vectors.dense(1.0, 0.0), Vectors.dense(0.0, 1.0),
+      Vectors.dense(1.0, 1.0), Vectors.dense(3.0, 1.0)
+    ).map(Geometry.l2Normalize)
+
+    val mean     = Vectors.dense(points.map(_.toArray).transpose.map(_.sum / points.size).toArray)
+    val meanNorm = math.sqrt(mean.toArray.map(x => x * x).sum)
+    val centroid = SphericalGeometry.project(mean)
+
+    val summed = points.map(p => SphericalGeometry.pointCost(UnitSphereDistance.compute(p, centroid))).sum
+    assert(math.abs(summed - points.size * (1.0 - meanNorm)) < 1e-12)
+  }
+
   test("registry resolves both geometries and rejects unknown ones") {
     assert(GeometryRegistry.get("euclidean") == EuclideanGeometry)
     assert(GeometryRegistry.get("SPHERICAL") == SphericalGeometry)

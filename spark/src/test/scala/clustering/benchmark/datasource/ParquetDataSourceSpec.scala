@@ -42,7 +42,6 @@ class ParquetDataSourceSpec extends AnyFunSuite with BeforeAndAfterAll {
     f.delete()
   }
 
-  /** Gaia/NYC shape: one `features` column of `array<double>`. */
   private def writeTabular(name: String, numRows: Int, dim: Int): String = {
     import spark.implicits._
     val path = tmpDir.resolve(name).toString
@@ -51,7 +50,6 @@ class ParquetDataSourceSpec extends AnyFunSuite with BeforeAndAfterAll {
     path
   }
 
-  /** Embedding shape: one `emb` column of `array<float>`. */
   private def writeEmbeddings(name: String, numRows: Int, dim: Int): String = {
     import spark.implicits._
     val path = tmpDir.resolve(name).toString

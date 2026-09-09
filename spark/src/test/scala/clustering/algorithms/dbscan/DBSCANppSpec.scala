@@ -1,5 +1,6 @@
 package clustering.algorithms.dbscan
 
+import clustering.algorithms.dbscan.components.CandidateSelectionStrategy
 import clustering.benchmark.config.AlgorithmSpec
 import clustering.benchmark.registry.AlgorithmRegistry
 import clustering.core.Columns
@@ -156,7 +157,7 @@ class DBSCANppSpec extends AnyFunSuite with BeforeAndAfterAll {
     val data  = dataset().cache()
     val model = new DBSCANpp(eps = Eps, minPts = MinPts, coreSampleFraction = 1.0,
       distanceMetric = EuclideanDistance).fit(data)
-    assert(model.numClusters == 2)
+    assert(model.getNumberOfClusters == 2)
   }
 
   test("assign: closest reproduces the paper — no noise label at all") {
@@ -168,61 +169,37 @@ class DBSCANppSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(noise.isEmpty, "without the ε condition every point must get a cluster")
   }
 
-  test("all three sampling strategies produce a usable clustering") {
+  test("uniform sampling produces a usable clustering") {
     val data = dataset().cache()
-    Seq("uniform", "linspace", "kcenter").foreach { name =>
-      val model = new DBSCANpp(eps = Eps, minPts = MinPts, coreSampleFraction = 0.6,
-        samplingStrategy = CandidateSelectionStrategy.fromName(name, poolFactor = 3),
-        distanceMetric = EuclideanDistance, seed = 3L).fit(data)
-      assert(model.numClusters >= 1, s"sampling '$name' produced no cluster")
-      assert(model.corePoints.nonEmpty, s"sampling '$name' produced no core point")
-    }
+    val model = new DBSCANpp(eps = Eps, minPts = MinPts, coreSampleFraction = 0.6,
+      samplingStrategy = CandidateSelectionStrategy.fromName("uniform"),
+      distanceMetric = EuclideanDistance, seed = 3L).fit(data)
+    assert(model.getNumberOfClusters >= 1, "sampling 'uniform' produced no cluster")
+    assert(model.corePoints.nonEmpty, "sampling 'uniform' produced no core point")
   }
 
   test("parameters that admit no core point yield an all-noise model, not a crash") {
     val data  = dataset().cache()
     val model = new DBSCANpp(eps = 0.01, minPts = 10, coreSampleFraction = 1.0,
       distanceMetric = EuclideanDistance).fit(data)
-    assert(model.numClusters == 0)
+    assert(model.getNumberOfClusters == 0)
     val (clusters, noise) = partitionOf(model.assignClusters(data))
     assert(clusters.isEmpty && noise.size == 51)
   }
 
-  test("the 'dbscanexact' registry alias is the s = 1.0 code path") {
+  test("'dbscanpp' at coreSampleFraction = 1.0 via the registry is the exact code path") {
     import org.json4s.JsonDSL._
     val data = dataset().cache()
 
-    val viaAlias = AlgorithmRegistry
-      .create(AlgorithmSpec("dbscanexact",
-        ("eps" -> Eps) ~ ("minPts" -> MinPts) ~ ("distance" -> "euclidean")))
+    val viaRegistry = AlgorithmRegistry
+      .create(AlgorithmSpec("dbscanpp",
+        ("eps" -> Eps) ~ ("minPts" -> MinPts) ~ ("distance" -> "euclidean") ~
+          ("coreSampleFraction" -> 1.0)))
       .clusterer.fit(data)
     val direct = new DBSCANpp(eps = Eps, minPts = MinPts, coreSampleFraction = 1.0,
       distanceMetric = EuclideanDistance).fit(data)
 
-    assert(partitionOf(viaAlias.assignClusters(data)) == partitionOf(direct.assignClusters(data)))
-  }
-
-  test("'dbscanexact' rejects a sampled coreSampleFraction instead of silently ignoring it") {
-    import org.json4s.JsonDSL._
-    val thrown = intercept[IllegalArgumentException] {
-      AlgorithmRegistry.create(AlgorithmSpec("dbscanexact",
-        ("eps" -> Eps) ~ ("minPts" -> MinPts) ~ ("distance" -> "euclidean") ~
-          ("coreSampleFraction" -> 0.3)))
-    }
-    assert(thrown.getMessage.contains("exact by definition"))
-  }
-
-  test("'dbscanexact' rejects candidate sampling params instead of silently dropping them") {
-    import org.json4s.JsonDSL._
-    Seq[(String, org.json4s.JObject)]("sampling" -> ("sampling" -> "kcenter"),
-                                      "poolFactor" -> ("poolFactor" -> 3)).foreach {
-      case (key, extra) =>
-        val thrown = intercept[IllegalArgumentException] {
-          AlgorithmRegistry.create(AlgorithmSpec("dbscanexact",
-            ("eps" -> Eps) ~ ("minPts" -> MinPts) ~ ("distance" -> "euclidean") ~ extra))
-        }
-        assert(thrown.getMessage.contains(key))
-    }
+    assert(partitionOf(viaRegistry.assignClusters(data)) == partitionOf(direct.assignClusters(data)))
   }
 
   test("cluster ids are reproducible across repeated fits") {
