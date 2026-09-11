@@ -49,4 +49,19 @@ object EuclideanDistance extends DistanceMetric {
     }
     if (sum <= limit) math.sqrt(sum) else Double.PositiveInfinity
   }
+
+  /** No `sqrt` at all: `bound` and the return value are squared distance (caller tracks the
+   *  running minimum in squared units — see `nearestRaw`). Correct since `sqrt` preserves order
+   *  for non-negative values, and the caller only needs that order. */
+  override def distanceUpToOrdinal(a: Array[Double], b: Array[Double], bound: Double): Double = {
+    var sum = 0.0
+    var i = 0
+    while (i < a.length) {
+      val d = a(i) - b(i)
+      sum += d * d
+      if (sum > bound) return Double.PositiveInfinity
+      i += 1
+    }
+    sum
+  }
 }

@@ -60,7 +60,8 @@ object NearestPrototypeModel {
     bestIdx
   }
 
-  /** Array-based fast path for [[nearest]]. Uses `distanceUpTo` for early exit pruning.
+  /** Array-based fast path for [[nearest]]. Uses `distanceUpToOrdinal` for early-exit pruning —
+   *  only the argmin is returned, so Euclidean never pays a `sqrt` here.
    *  Ties are safely resolved to the first (lowest) index. */
   def nearestRaw(coords: Array[Double], prototypes: Array[Array[Double]], distance: DistanceMetric): Int = {
     var bestIdx = 0
@@ -68,7 +69,7 @@ object NearestPrototypeModel {
     var j = 0
 
     while (j < prototypes.length) {
-      val d = distance.distanceUpTo(coords, prototypes(j), minD)
+      val d = distance.distanceUpToOrdinal(coords, prototypes(j), minD)
       if (d < minD) {
         minD = d
         bestIdx = j

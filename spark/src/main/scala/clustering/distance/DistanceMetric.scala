@@ -84,4 +84,13 @@ trait DistanceMetric extends Serializable {
     val d = compute(Vectors.dense(a), Vectors.dense(b))
     if (d <= bound) d else Double.PositiveInfinity
   }
+
+  /** Same early-exit scan as [[distanceUpTo]], for callers that only need ORDER, never the value
+   *  (`NearestPrototypeModel.nearestRaw`). `bound`/return are in whatever units this metric's
+   *  ordering is monotonic under — only meaningful across calls on the SAME metric instance.
+   *
+   *  Default: delegates to [[distanceUpTo]] — correct everywhere, but leaves `sqrt` unpruned.
+   *  [[EuclideanDistance]] overrides to stay in squared space, since callers here only compare. */
+  def distanceUpToOrdinal(a: Array[Double], b: Array[Double], bound: Double): Double =
+    distanceUpTo(a, b, bound)
 }

@@ -48,7 +48,10 @@ class BisectingKMeansModel(
   override def assignClusters(data: DataFrame): DataFrame = {
     val bc         = broadcast(data)
     val dist       = distance
-    val predictUDF = udf { features: Vector => BisectingKMeansModel.label(features, bc.value, dist) }
+    // Coordinates unpacked ONCE per row (`toArray` is the vector's own array when dense), so the
+    // O(depth) tree walk below runs the raw-array kernel at every level instead of re-dispatching
+    // on the vector's type each time.
+    val predictUDF = udf { features: Vector => BisectingKMeansModel.label(features.toArray, bc.value, dist) }
     data.withColumn(Columns.Prediction, predictUDF(col(Columns.Features)))
   }
 
@@ -63,15 +66,20 @@ class BisectingKMeansModel(
 
 object BisectingKMeansModel {
 
-  /** Cluster id of `features`: descend to the closer child centroid at every level. */
+  /** Cluster id of `coords`: descend to the closer child centroid at every level.
+   *
+   *  Uses `distanceUpToOrdinal` (unbounded, so no early exit — this compares two FULL distances,
+   *  never a bound) purely to stay sqrt-free for Euclidean; only the argmin between two values
+   *  matters here, never the value itself, same as [[clustering.core.NearestPrototypeModel.nearestRaw]]. */
   @tailrec
-  def label(features: Vector, node: ClusterNode, distance: DistanceMetric): Int = node match {
+  def label(coords: Array[Double], node: ClusterNode, distance: DistanceMetric): Int = node match {
     case LeafNode(id, _) => id
     case InternalNode(_, left, right) =>
       // `<=` keeps ties going left, so labelling is deterministic.
-      val next = if (distance.compute(features, left.centroid) <= distance.compute(features, right.centroid)) left
-                 else right
-      label(features, next, distance)
+      val leftD  = distance.distanceUpToOrdinal(coords, left.centroid.toArray, Double.MaxValue)
+      val rightD = distance.distanceUpToOrdinal(coords, right.centroid.toArray, Double.MaxValue)
+      val next = if (leftD <= rightD) left else right
+      label(coords, next, distance)
   }
 
   def leaves(node: ClusterNode): Seq[LeafNode] = node match {

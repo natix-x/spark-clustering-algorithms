@@ -205,11 +205,11 @@ class BisectingKMeans(
       var min = Double.MaxValue
       var j = 0
       while (j < raw.length) {
-        val d = metric.distanceUpTo(coords, raw(j), min)
+        val d = metric.distanceUpToOrdinal(coords, raw(j), min)
         if (d < min) min = d
         j += 1
       }
-      geom.pointCost(min)
+      geom.pointCostFromOrdinal(min)
     }
     val row: Row = df
       .select((costUDF(col(Columns.Features)) * col(Columns.Weight)).as("pointCost"))
@@ -243,8 +243,12 @@ class BisectingKMeans(
    *  answer different questions: see [[BisectingKMeans.LeafState]]. */
   private def computeLeafStats(df: DataFrame, centroid: Vector, metric: DistanceMetric): (Long, Double, Double) = {
     val geom = geometry // local val: the UDF must not capture the enclosing clusterer
+    // Raw-array + ordinal, like every other scan in the codebase: no Vector-overload dispatch,
+    // no sqrt paid just to be squared back by `pointCost` for Euclidean.
+    val centroidArr = centroid.toArray
     val costUDF = udf { features: Vector =>
-      geom.pointCost(metric.compute(features, centroid))
+      val ordinal = metric.distanceUpToOrdinal(features.toArray, centroidArr, Double.MaxValue)
+      geom.pointCostFromOrdinal(ordinal)
     }
     val row: Row = df
       .select(col(Columns.Weight),

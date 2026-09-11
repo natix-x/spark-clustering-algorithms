@@ -47,7 +47,13 @@ class BreathingKMeans(
     val setup = LloydKMeans.initialize(data, geometry, k, seed, StorageLevel.MEMORY_AND_DISK)
 
     var bestCentroids = LloydKMeans.run(setup.preparedPoints, setup.initialCentroids, setup.fitDistance, geometry, maxIter, eps)
-    var bestSSE = computeTotalError(setup.preparedPoints, bestCentroids, setup.fitDistance)
+    // Stats for `bestCentroids` are recomputed only when `bestCentroids` itself changes (a
+    // successful cycle, below) — a FAILED cycle leaves `bestCentroids` untouched, so without this
+    // cache the next "breathe in" step would re-run this full-data job on byte-identical input.
+    // Cycles are expected to fail more often as `currentM` shrinks toward 0, so this removes a
+    // real, growing fraction of the run's jobs, not just a one-off.
+    var bestStats = calculateCentroidStats(setup.preparedPoints, bestCentroids, setup.fitDistance)
+    var bestSSE = bestStats.map(_.error).sum
     logger.info(f"breathing: k=$k m0=$m0 initial SSE=$bestSSE%.4f")
 
     val random = new Random(seed)
@@ -56,7 +62,7 @@ class BreathingKMeans(
 
     while (currentM > 0 && cycles < maxCycles) {
       // ── breathe in ────────────────────────────────────────────────────────────────
-      val centroidStatistics = calculateCentroidStats(setup.preparedPoints, bestCentroids, setup.fitDistance)
+      val centroidStatistics = bestStats
       val totalMass = centroidStatistics.map(_.mass).sum
       // Scale of the insertion offset: a typical DISTANCE, so the mean cost has to be mapped
       // back through the geometry (euclidean = RMSE; spherical = mean 1 − cos, already a
@@ -83,9 +89,11 @@ class BreathingKMeans(
           LloydKMeans.run(setup.preparedPoints, keptIndices.toArray.sorted.map(expandedCentroids), setup.fitDistance, geometry, maxIter, eps)
         }
 
-      val candidateError = computeTotalError(setup.preparedPoints, reducedCentroids, setup.fitDistance)
+      val reducedStats = calculateCentroidStats(setup.preparedPoints, reducedCentroids, setup.fitDistance)
+      val candidateError = reducedStats.map(_.error).sum
       if (candidateError < bestSSE) {
         bestCentroids = reducedCentroids
+        bestStats = reducedStats
         bestSSE = candidateError
       } else {
         // A failed cycle costs one unit of breath; the search restarts from the best solution so far.
@@ -142,28 +150,24 @@ class BreathingKMeans(
     removedIndices.toSet
   }
 
+  /** Plain nearest-neighbour scan (never top-2, so unlike the fold below the shrinking-bound
+   *  early exit is safe here — see `calculateCentroidStats`'s comment for why top-2 is different).
+   *  Raw-array + `distanceUpToOrdinal`: sqrt-free for Euclidean, and the bound genuinely shrinks
+   *  as better candidates are found, same pattern as `NearestPrototypeModel.nearestRaw`. */
   private def findNearestNeighborIndex(centroids: Array[Vector], idx: Int, metric: DistanceMetric): Option[Int] = {
+    val target = centroids(idx).toArray
     var nearestIndex = -1
     var nearestDistance = Double.MaxValue
     var candidateIndex = 0
     while (candidateIndex < centroids.length) {
       if (candidateIndex != idx) {
-        val d = metric.compute(centroids(idx), centroids(candidateIndex))
+        val d = metric.distanceUpToOrdinal(target, centroids(candidateIndex).toArray, nearestDistance)
         if (d < nearestDistance) { nearestDistance = d; nearestIndex = candidateIndex }
       }
       candidateIndex += 1
     }
     if (nearestIndex >= 0) Some(nearestIndex) else None
   }
-
-  /** φ(C, X) = Σ_x w · φ(d(x, nearest centroid)) — the objective breathing minimises, with the
-   *  per-point term taken from [[Geometry.pointCost]] instead of being squared unconditionally.
-   *  Fritzke writes d² because he works in Euclidean space, where that IS the objective; under
-   *  `geometry: spherical` the wrapped Lloyd loop optimises Σ w·(1 − cos) instead, and breathing
-   *  has to breathe on the same functional it is wrapped around — otherwise it would insert and
-   *  delete centroids by a ranking the iteration does not agree with. */
-  private def computeTotalError(points: DataFrame, centroids: Array[Vector], metric: DistanceMetric): Double =
-    calculateCentroidStats(points, centroids, metric).map(_.error).sum
 
   /** Per-centroid statistics needed by breathing k-means, all three in ONE Spark job.
    *
@@ -194,32 +198,6 @@ class BreathingKMeans(
     val dist = distance
     val geom = geometry // local val: the UDF must not capture the enclosing clusterer
 
-    // (nearest index, φ(d1), φ(d2)) per point; d2 falls back to d1 when there is a single centroid.
-    val calculatePointDistancesUDF = udf { features: Vector =>
-      val coords = features.toArray
-      val currentCentroids = broadcastCentroids.value
-      var nearestIndex = 0
-      var nearestDistance = Double.MaxValue
-      var secondNearestDistance = Double.MaxValue
-      var i = 0
-      while (i < currentCentroids.length) {
-        val d = dist.compute(coords, currentCentroids(i))
-        if (d < nearestDistance) {
-          secondNearestDistance = nearestDistance;
-          nearestDistance = d;
-          nearestIndex = i
-        }
-        else if (d < secondNearestDistance) {
-          secondNearestDistance = d
-        }
-        i += 1
-      }
-      val secondNearestCost =
-        if (secondNearestDistance == Double.MaxValue) geom.pointCost(nearestDistance)
-        else geom.pointCost(secondNearestDistance)
-      (nearestIndex, geom.pointCost(nearestDistance), secondNearestCost)
-    }
-
     // ONE ordered fold instead of struct-select + groupBy + three sums. Same shape as Lloyd's
     // (measured 5.3x there, 5.09.2026): the per-row work is an opaque distance loop either way,
     // so Catalyst has nothing to optimise and the DataFrame form only adds a VectorUDT round-trip
@@ -239,10 +217,12 @@ class BreathingKMeans(
         var secondNearestDistance = Double.MaxValue
         var i = 0
         while (i < cs.length) {
-          // Plain compute(), not distanceUpTo against the shrinking d2 — measured 5.09.2026 to
-          // REGRESS on a top-2 scan at every k >= 32; see CentroidIteration.PartialAssign on the
-          // Flink side for the same finding and the reason (d2 is nothing like a small fixed ε).
-          val d = dist.compute(coords, cs(i))
+          // Bound frozen at Double.MaxValue, so this NEVER early-exits — deliberately: shrinking
+          // the bound against d2 was measured 5.09.2026 to REGRESS a top-2 scan at every k >= 32
+          // (see CentroidIteration.PartialAssign on the Flink side for the same finding; d2 is
+          // nothing like a small fixed ε). The frozen bound still buys the sqrt-free ordinal path
+          // for Euclidean (see DistanceMetric.distanceUpToOrdinal) without touching that decision.
+          val d = dist.distanceUpToOrdinal(coords, cs(i), Double.MaxValue)
           if (d < nearestDistance) {
             secondNearestDistance = nearestDistance
             nearestDistance = d
@@ -252,10 +232,10 @@ class BreathingKMeans(
           }
           i += 1
         }
-        val errorCost = geom.pointCost(nearestDistance)
+        val errorCost = geom.pointCostFromOrdinal(nearestDistance)
         val secondCost =
           if (secondNearestDistance == Double.MaxValue) errorCost
-          else geom.pointCost(secondNearestDistance)
+          else geom.pointCostFromOrdinal(secondNearestDistance)
 
         val base = nearestIndex * 3
         arr(base)     += w                              // mass

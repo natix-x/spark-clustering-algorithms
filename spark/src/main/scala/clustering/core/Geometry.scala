@@ -28,6 +28,11 @@ sealed trait Geometry extends Serializable {
   def pointCost(distance: Double): Double
   /** Inverse of [[pointCost]], converting a mean cost back into a typical distance. */
   def costToDistance(meanCost: Double): Double
+  /** Same as [[pointCost]], but from the ORDINAL value `DistanceMetric.distanceUpToOrdinal`
+   *  produced, not the real distance. Default: ordinal already IS the real distance, defers to
+   *  [[pointCost]]. Euclidean overrides to plain identity — its ordinal is already `d²`, which is
+   *  what `pointCost` computes anyway, so no `sqrt` in and `*` back out for nothing. */
+  def pointCostFromOrdinal(ordinal: Double): Double = pointCost(ordinal)
 }
 
 /** Plain Euclidean (Lloyd) geometry. */
@@ -41,6 +46,8 @@ object EuclideanGeometry extends Geometry {
   override def project(centroid: Vector): Vector = centroid
   override def pointCost(distance: Double): Double = distance * distance
   override def costToDistance(meanCost: Double): Double = math.sqrt(meanCost)
+  // The paired EuclideanDistance's ordinal IS the squared distance already — identity.
+  override def pointCostFromOrdinal(ordinal: Double): Double = ordinal
 }
 
 /** Spherical geometry (unit hypersphere). */

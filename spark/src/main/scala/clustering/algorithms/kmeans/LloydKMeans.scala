@@ -50,11 +50,12 @@ private[kmeans] object LloydKMeans {
     val projected = geometry.prepare(Weights.withWeights(data))
     val ownsCache = geometry.transformsFeatures
     val preparedPoints = if (ownsCache) projected.persist(storageLevel) else projected
-    val n = preparedPoints.count()
 
     val initialCentroids = sampleInitialCentroids(preparedPoints, k, seed)
+    // `require`'s message is by-name, so this `count()` — a standalone full-data-scan job otherwise
+    // paid on EVERY fit — only runs on the failure path, not on every call.
     require(initialCentroids.length == k,
-      s"Could not sample $k initialCentroids centroids — dataset too small (n=$n).")
+      s"Could not sample $k initialCentroids centroids — dataset too small (n=${preparedPoints.count()}).")
 
     LloydContext(preparedPoints, fitDistance, initialCentroids, ownsCache)
   }
@@ -95,11 +96,11 @@ private[kmeans] object LloydKMeans {
       val bc   = sc.broadcast(centroids.map(_.toArray))
       val dist = fitDistance
 
-      // ORDERED merge: Lloyd's centroids ARE the sums, so a task-completion-order merge would
-      // make two runs of one configuration differ in the last bits — losing the reproducibility
-      // the thesis reports as a Spark-side result. The accumulator is k*(d+1) doubles per
-      // partition, so ordering it costs nothing here (see PartitionAggregator).
-      val acc = PartitionAggregator.aggregateDoublesOrdered(rdd, accLength) { (arr, row) =>
+      // Plain treeAggregate (task-completion-order merge): bit-for-bit reproducibility between two
+      // fits of the same config is NOT required here (reversed 11.09.2026, see CLAUDE.md) — the
+      // ordered variant's driver-collect cost isn't worth paying just to keep that guarantee, so
+      // run-to-run variance is left to measure rather than pinned away.
+      val acc = PartitionAggregator.aggregateDoubles(rdd, accLength) { (arr, row) =>
         // `toArray` is the vector's OWN array when dense — one field read per row, no copy.
         val coords = row._1.toArray
         val w      = row._2
