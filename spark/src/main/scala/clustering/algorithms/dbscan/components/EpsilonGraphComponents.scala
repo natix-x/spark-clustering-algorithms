@@ -1,6 +1,5 @@
 package clustering.algorithms.dbscan.components
 
-import clustering.algorithms.dbscan.utils.ScanProgress
 import clustering.distance.DistanceMetric
 import clustering.utils.UnionFind
 import org.apache.spark.ml.linalg.Vector
@@ -54,7 +53,6 @@ private[dbscan] object EpsilonGraphComponents {
     rowsPerBlock: Int = MAX_ROWS_PER_DISTRIBUTED_BLOCK
   ): Array[Int] = {
     val unionFind = new UnionFind(cores.length)
-    val progress = new ScanProgress(cores.length)
     val broadcastCores = sc.broadcast(extractRawCoordinates(cores))
     val coreCount = cores.length
 
@@ -97,7 +95,6 @@ private[dbscan] object EpsilonGraphComponents {
           }
         }
         blockStart = blockEnd
-        progress.report(blockStart, "distributed")
       }
     } finally {
       broadcastCores.destroy()

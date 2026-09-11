@@ -1,6 +1,6 @@
 package clustering.algorithms.dbscan
 
-import clustering.algorithms.dbscan.components.{CandidateSelectionStrategy, EpsilonGraphComponents, EpsilonNeighbourCounter, UniformSelection}
+import clustering.algorithms.dbscan.components.{EpsilonGraphComponents, EpsilonNeighbourCounter, UniformSelection}
 import clustering.core.{Clusterer, Weights}
 import clustering.distance.{DistanceMetric, EuclideanDistance}
 import org.apache.spark.sql.DataFrame
@@ -19,7 +19,7 @@ class DBSCANpp(
   val eps: Double,
   val minPts: Int,
   val coreSampleFraction: Double,
-  val samplingStrategy: CandidateSelectionStrategy = UniformSelection,
+  val samplingStrategy: UniformSelection.type = UniformSelection,
   val requireWithinEps: Boolean = true,
   val distanceMetric: DistanceMetric = EuclideanDistance,
   val seed: Long = 42L
@@ -29,15 +29,19 @@ class DBSCANpp(
 
   override def fit(data: DataFrame): CoreLabelModel = {
     val datasetPoints = Weights.withWeights(data)
-    val datasetSize   = datasetPoints.count()
 
-    // m is an Int — every downstream structure (candidates, ε-graph, union-find) is driver-local.
-    val candidateCount =
-      math.max(1L, math.min(datasetSize, math.ceil(coreSampleFraction * datasetSize).toLong)).toInt
-
-    // Step 1: candidate core points
-    val candidatePoints =
-      samplingStrategy.selectCandidates(datasetPoints, datasetSize, candidateCount, seed, distanceMetric)
+    // Step 1: candidate core points. s >= 1.0 is the exact oracle (every point is a candidate),
+    // so `selectAll`'s collect() already gives us n — no separate `count()` job first.
+    val (datasetSize, candidatePoints) =
+      if (coreSampleFraction >= 1.0) {
+        val all = samplingStrategy.selectAll(datasetPoints)
+        (all.length.toLong, all)
+      } else {
+        val n = datasetPoints.count()
+        // m is an Int — every downstream structure (candidates, ε-graph, union-find) is driver-local.
+        val candidateCount = math.max(1L, math.min(n, math.ceil(coreSampleFraction * n).toLong)).toInt
+        (n, samplingStrategy.selectCandidates(datasetPoints, n, candidateCount, seed))
+      }
     logger.info(s"dbscanpp: datasetSize=$datasetSize m=${candidatePoints.length} sampling=${samplingStrategy.strategyName} " +
       s"eps=$eps minPts=$minPts s=$coreSampleFraction")
 
