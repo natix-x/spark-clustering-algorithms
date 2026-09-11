@@ -48,9 +48,8 @@ class BisectingKMeansModel(
   override def assignClusters(data: DataFrame): DataFrame = {
     val bc         = broadcast(data)
     val dist       = distance
-    // Coordinates unpacked ONCE per row (`toArray` is the vector's own array when dense), so the
-    // O(depth) tree walk below runs the raw-array kernel at every level instead of re-dispatching
-    // on the vector's type each time.
+    // Coordinates unpacked once per row, so the O(depth) tree walk runs raw-array at every level
+    // instead of re-dispatching on the vector's type each time.
     val predictUDF = udf { features: Vector => BisectingKMeansModel.label(features.toArray, bc.value, dist) }
     data.withColumn(Columns.Prediction, predictUDF(col(Columns.Features)))
   }
@@ -66,11 +65,9 @@ class BisectingKMeansModel(
 
 object BisectingKMeansModel {
 
-  /** Cluster id of `coords`: descend to the closer child centroid at every level.
-   *
-   *  Uses `distanceUpToOrdinal` (unbounded, so no early exit — this compares two FULL distances,
-   *  never a bound) purely to stay sqrt-free for Euclidean; only the argmin between two values
-   *  matters here, never the value itself, same as [[clustering.core.NearestPrototypeModel.nearestRaw]]. */
+  /** Cluster id of `coords`: descend to the closer child centroid at every level. Uses
+   *  `distanceUpToOrdinal` (unbounded, comparing two full distances) purely to stay sqrt-free —
+   *  only the argmin matters, same as [[clustering.core.NearestPrototypeModel.nearestRaw]]. */
   @tailrec
   def label(coords: Array[Double], node: ClusterNode, distance: DistanceMetric): Int = node match {
     case LeafNode(id, _) => id

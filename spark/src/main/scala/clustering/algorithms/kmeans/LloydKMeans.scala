@@ -52,8 +52,7 @@ private[kmeans] object LloydKMeans {
     val preparedPoints = if (ownsCache) projected.persist(storageLevel) else projected
 
     val initialCentroids = sampleInitialCentroids(preparedPoints, k, seed)
-    // `require`'s message is by-name, so this `count()` — a standalone full-data-scan job otherwise
-    // paid on EVERY fit — only runs on the failure path, not on every call.
+    // by-name message: this count() job only runs on the failure path, not on every fit.
     require(initialCentroids.length == k,
       s"Could not sample $k initialCentroids centroids — dataset too small (n=${preparedPoints.count()}).")
 
@@ -96,10 +95,8 @@ private[kmeans] object LloydKMeans {
       val bc   = sc.broadcast(centroids.map(_.toArray))
       val dist = fitDistance
 
-      // Plain treeAggregate (task-completion-order merge): bit-for-bit reproducibility between two
-      // fits of the same config is NOT required here (reversed 11.09.2026, see CLAUDE.md) — the
-      // ordered variant's driver-collect cost isn't worth paying just to keep that guarantee, so
-      // run-to-run variance is left to measure rather than pinned away.
+      // Plain treeAggregate: bit-for-bit reproducibility is no longer required here (reversed
+      // 11.09.2026, see CLAUDE.md) — not worth the ordered variant's driver-collect cost.
       val acc = PartitionAggregator.aggregateDoubles(rdd, accLength) { (arr, row) =>
         // `toArray` is the vector's OWN array when dense — one field read per row, no copy.
         val coords = row._1.toArray

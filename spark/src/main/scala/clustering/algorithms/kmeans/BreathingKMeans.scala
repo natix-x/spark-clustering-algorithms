@@ -47,11 +47,9 @@ class BreathingKMeans(
     val setup = LloydKMeans.initialize(data, geometry, k, seed, StorageLevel.MEMORY_AND_DISK)
 
     var bestCentroids = LloydKMeans.run(setup.preparedPoints, setup.initialCentroids, setup.fitDistance, geometry, maxIter, eps)
-    // Stats for `bestCentroids` are recomputed only when `bestCentroids` itself changes (a
-    // successful cycle, below) — a FAILED cycle leaves `bestCentroids` untouched, so without this
-    // cache the next "breathe in" step would re-run this full-data job on byte-identical input.
-    // Cycles are expected to fail more often as `currentM` shrinks toward 0, so this removes a
-    // real, growing fraction of the run's jobs, not just a one-off.
+    // Recomputed only when bestCentroids changes (a successful cycle) — a failed cycle would
+    // otherwise re-run this full-data job on unchanged input, and failures grow more common as
+    // currentM shrinks toward 0.
     var bestStats = calculateCentroidStats(setup.preparedPoints, bestCentroids, setup.fitDistance)
     var bestSSE = bestStats.map(_.error).sum
     logger.info(f"breathing: k=$k m0=$m0 initial SSE=$bestSSE%.4f")
@@ -150,10 +148,8 @@ class BreathingKMeans(
     removedIndices.toSet
   }
 
-  /** Plain nearest-neighbour scan (never top-2, so unlike the fold below the shrinking-bound
-   *  early exit is safe here — see `calculateCentroidStats`'s comment for why top-2 is different).
-   *  Raw-array + `distanceUpToOrdinal`: sqrt-free for Euclidean, and the bound genuinely shrinks
-   *  as better candidates are found, same pattern as `NearestPrototypeModel.nearestRaw`. */
+  /** Plain nearest scan, never top-2 — shrinking bound is safe here (see `calculateCentroidStats`
+   *  for why top-2 is different). Raw-array `distanceUpToOrdinal`, same pattern as `nearestRaw`. */
   private def findNearestNeighborIndex(centroids: Array[Vector], idx: Int, metric: DistanceMetric): Option[Int] = {
     val target = centroids(idx).toArray
     var nearestIndex = -1
@@ -217,11 +213,8 @@ class BreathingKMeans(
         var secondNearestDistance = Double.MaxValue
         var i = 0
         while (i < cs.length) {
-          // Bound frozen at Double.MaxValue, so this NEVER early-exits — deliberately: shrinking
-          // the bound against d2 was measured 5.09.2026 to REGRESS a top-2 scan at every k >= 32
-          // (see CentroidIteration.PartialAssign on the Flink side for the same finding; d2 is
-          // nothing like a small fixed ε). The frozen bound still buys the sqrt-free ordinal path
-          // for Euclidean (see DistanceMetric.distanceUpToOrdinal) without touching that decision.
+          // Bound frozen at MaxValue — never early-exits, deliberately (shrinking against d2
+          // regresses top-2 scans at k>=32, measured 5.09.2026). Still sqrt-free for Euclidean.
           val d = dist.distanceUpToOrdinal(coords, cs(i), Double.MaxValue)
           if (d < nearestDistance) {
             secondNearestDistance = nearestDistance
