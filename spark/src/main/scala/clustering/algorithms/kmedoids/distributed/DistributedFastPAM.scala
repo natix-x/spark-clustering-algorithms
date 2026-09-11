@@ -88,10 +88,12 @@ class DistributedFastPAM(
           val point           = pointVector.toArray
           val candidates      = broadcastCandidates.value
           val selected        = broadcastSelected.value
+          // Plain nearest scan, not top-2 — shrinking bound is safe. Feeds a real subtraction
+          // below, so ordinal/sqrt-free doesn't apply, just the early exit.
           var distanceToNearestMedoid = Double.MaxValue
           var slot = 0
           while (slot < selected.length) {
-            val d = metric.compute(selected(slot), point)
+            val d = metric.distanceUpTo(selected(slot), point, distanceToNearestMedoid)
             if (d < distanceToNearestMedoid) distanceToNearestMedoid = d
             slot += 1
           }

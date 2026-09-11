@@ -29,18 +29,25 @@ class FastPAM(
     require(weights.length == pointCount, s"weights (${weights.length}) must match points ($pointCount)")
 
     val distances = DistanceMatrix.pairwise(points, distance)
-    var medoids = MedoidBuildPhase.selectInitialMedoids(distances, k, weights)
-    val cache= new NearestMedoidCache(pointCount)
+    val medoids   = MedoidBuildPhase.selectInitialMedoids(distances, k, weights)
+    val cache     = new NearestMedoidCache(pointCount)
+    cache.refresh(distances, medoids) // once: the cache starts empty after BUILD
+
+    val isMedoid = new Array[Boolean](pointCount)
+    medoids.foreach(m => isMedoid(m) = true)
 
     var iteration = 0
     var improved = true
     while (improved && iteration < maxIter) {
-      cache.refresh(distances, medoids)
-      val move = bestSwap(distances, medoids, weights, cache)
+      val move = bestSwap(distances, weights, cache, isMedoid)
       improved = SwapMove.isImprovement(move)
       if (improved) {
-        medoids = medoids.clone()
+        isMedoid(medoids(move.slot)) = false
         medoids(move.slot) = move.candidate
+        isMedoid(move.candidate) = true
+        // Incremental update, not full O(n·k) refresh — only move.slot changed. Same as
+        // FasterPAM; see NearestMedoidCache.updateAfterSwap.
+        cache.updateAfterSwap(distances, medoids, move.slot)
       }
       iteration += 1
     }
@@ -51,13 +58,10 @@ class FastPAM(
   /** Best (slot, candidate) swap over all non-medoid candidates. */
   private def bestSwap(
     distances: DistanceMatrix,
-    medoids:   Array[Int],
     weights:   Array[Double],
-    cache:     NearestMedoidCache
+    cache:     NearestMedoidCache,
+    isMedoid:  Array[Boolean]
   ): SwapMove = {
-    val isMedoid = new Array[Boolean](distances.pointCount)
-    medoids.foreach(m => isMedoid(m) = true)
-
     // One O(n) Δ pass per candidate, ascending, so `preferred` sees candidates in index order and
     // the tie rule resolves to the lowest index.
     val deltasBySlot = new Array[Double](k)   // reused across candidates: the scan allocates nothing

@@ -1,7 +1,7 @@
 package clustering.algorithms.kmedoids.components
 
 import clustering.algorithms.kmedoids.hybrid.CLARA
-import clustering.core.{Columns, Weights}
+import clustering.core.Weights
 import clustering.distance.DistanceMetric
 import clustering.utils.PartitionAggregator
 import org.apache.spark.ml.linalg.Vector
@@ -31,15 +31,11 @@ private[kmedoids] object MedoidCost {
     val broadcastSets = data.sparkSession.sparkContext.broadcast(medoidSets.map(_.map(_.toArray)))
     val metric = distance
 
-    // ONE ordered fold over the data, accumulating all S set costs at once. The DataFrame form
-    // this replaces built S separate UDF columns, so every row paid the VectorUDT round-trip and
-    // `toArray` S TIMES — the same per-row overhead Lloyd's rewrite removed (measured 5.3× there,
-    // 5.09.2026), multiplied by the number of candidate sets. Here the coordinates are unpacked
-    // once and the S scans share them.
+    // ONE fold: S set costs at once, coordinates unpacked once and shared
     //
-    // Ordered merge, S doubles: these costs pick CLARA's winning sample, so two runs of one
-    // configuration must not disagree in the last bits and then choose differently.
-    val costs = PartitionAggregator.aggregateDoublesOrdered(
+    // Unordered: feeds only CLARA's argmin over candidate sets — a discrete pick, same category
+    // as distfastpam/dbscanpp, so bit-order doesn't matter.
+    val costs = PartitionAggregator.aggregateDoubles(
       Weights.toRdd(data), medoidSets.length) { (acc, row) =>
         val point = row._1.toArray
         val w     = row._2

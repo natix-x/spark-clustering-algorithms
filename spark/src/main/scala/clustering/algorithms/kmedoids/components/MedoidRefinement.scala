@@ -47,20 +47,23 @@ private[kmedoids] object MedoidRefinement {
       val slotCandidates = slotMajor.candidates
       val slotBounds = slotMajor.bounds
 
-      // One distributed pass: each point scores only the candidates of ITS OWN slot.
-      val broadcastCandidates = sc.broadcast(slotCandidates)
-      val broadcastMedoids = sc.broadcast(medoids)
+      // One distributed pass, raw arrays unpacked once: slot pick is a pure argmin (`nearestRaw`,
+      // sqrt-free), but the cost is a running SUM of real distances — squaring would reorder
+      // candidates — so it keeps raw-array `compute`, just without the Vector-overload dispatch.
+      val broadcastCandidates = sc.broadcast(slotCandidates.map(_.toArray))
+      val broadcastMedoids = sc.broadcast(medoids.map(_.toArray))
       val broadcastBounds = sc.broadcast(slotBounds)
       val metric = distance
       val candidateCosts = PartitionAggregator.aggregateDoubles(points, slotCandidates.length) {
         (costs, pointAndWeight) =>
           val (point, weight) = pointAndWeight
-          val slot = NearestPrototypeModel.nearest(point, broadcastMedoids.value, metric)
+          val coords = point.toArray
+          val slot = NearestPrototypeModel.nearestRaw(coords, broadcastMedoids.value, metric)
           val candidatesOfSlot = broadcastCandidates.value
           var index = broadcastBounds.value(slot)
           val end   = broadcastBounds.value(slot + 1)
           while (index < end) {
-            costs(index) += weight * metric.compute(point, candidatesOfSlot(index))
+            costs(index) += weight * metric.compute(coords, candidatesOfSlot(index))
             index += 1
           }
       }
@@ -96,10 +99,11 @@ private[kmedoids] object MedoidRefinement {
     medoids: Array[Vector],
     distance: DistanceMetric
   ): SlotMajorCandidates = {
+    val medoidsRaw = medoids.map(_.toArray) // unpacked once, reused by every candidate below
     val perSlot = Array.fill(medoids.length)(List.newBuilder[Vector])
     var index = 0
     while (index < candidates.length) {
-      perSlot(NearestPrototypeModel.nearest(candidates(index), medoids, distance)) += candidates(index)
+      perSlot(NearestPrototypeModel.nearestRaw(candidates(index).toArray, medoidsRaw, distance)) += candidates(index)
       index += 1
     }
     val groups = perSlot.map(_.result().toArray)
