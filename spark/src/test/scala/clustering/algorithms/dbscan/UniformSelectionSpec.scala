@@ -2,7 +2,6 @@ package clustering.algorithms.dbscan
 
 import clustering.algorithms.dbscan.components.UniformSelection
 import clustering.core.Columns
-import clustering.distance.EuclideanDistance
 import org.apache.spark.ml.linalg.{Vector, Vectors}
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.scalatest.BeforeAndAfterAll
@@ -56,7 +55,7 @@ class UniformSelectionSpec extends AnyFunSuite with BeforeAndAfterAll {
       val m    = math.ceil(s * n).toInt
 
       val candidates =
-        UniformSelection.selectCandidates(data, n, m, seed = 11L, distanceMetric = EuclideanDistance)
+        UniformSelection.selectCandidates(data, n, m, seed = 11L)
 
       assert(candidates.length <= m,
         s"uniform returned ${candidates.length} candidates for m=$m — " +
@@ -79,7 +78,7 @@ class UniformSelectionSpec extends AnyFunSuite with BeforeAndAfterAll {
     val n    = 2L * Half
     (1L to 25L).foreach { seed =>
       val m = 20
-      val candidates = UniformSelection.selectCandidates(data, n, m, seed, EuclideanDistance)
+      val candidates = UniformSelection.selectCandidates(data, n, m, seed)
       assert(candidates.length == m,
         s"uniform returned ${candidates.length} candidates for m=$m at seed=$seed")
     }
@@ -87,7 +86,7 @@ class UniformSelectionSpec extends AnyFunSuite with BeforeAndAfterAll {
 
   test("uniform is reproducible for a fixed seed and partitioning") {
     val data = orderCorrelated().cache()
-    def run(): Seq[String] = UniformSelection.selectCandidates(data, 2L * Half, 40, seed = 5L, distanceMetric = EuclideanDistance)
+    def run(): Seq[String] = UniformSelection.selectCandidates(data, 2L * Half, 40, seed = 5L)
       .map(_.toString).toSeq
     assert(run() == run(), "uniform is not reproducible")
   }
@@ -95,7 +94,7 @@ class UniformSelectionSpec extends AnyFunSuite with BeforeAndAfterAll {
   test("s = 1.0 collects every row") {
     val data = orderCorrelated().cache()
     val n    = 2L * Half
-    val all = UniformSelection.selectCandidates(data, n, n.toInt, seed = 1L, distanceMetric = EuclideanDistance)
+    val all = UniformSelection.selectCandidates(data, n, n.toInt, seed = 1L)
     assert(all.length == n, s"uniform lost rows in exact mode: ${all.length} of $n")
   }
 

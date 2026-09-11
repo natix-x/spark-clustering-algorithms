@@ -1,6 +1,6 @@
 package clustering.algorithms.dbscan
 
-import clustering.algorithms.dbscan.components.CandidateSelectionStrategy
+import clustering.algorithms.dbscan.components.UniformSelection
 import clustering.benchmark.config.AlgorithmSpec
 import clustering.benchmark.registry.AlgorithmRegistry
 import clustering.core.Columns
@@ -172,7 +172,7 @@ class DBSCANppSpec extends AnyFunSuite with BeforeAndAfterAll {
   test("uniform sampling produces a usable clustering") {
     val data = dataset().cache()
     val model = new DBSCANpp(eps = Eps, minPts = MinPts, coreSampleFraction = 0.6,
-      samplingStrategy = CandidateSelectionStrategy.fromName("uniform"),
+      samplingStrategy = UniformSelection.fromName("uniform"),
       distanceMetric = EuclideanDistance, seed = 3L).fit(data)
     assert(model.getNumberOfClusters >= 1, "sampling 'uniform' produced no cluster")
     assert(model.corePoints.nonEmpty, "sampling 'uniform' produced no core point")

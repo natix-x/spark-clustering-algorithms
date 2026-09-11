@@ -71,8 +71,15 @@ class BisectingLeafSelectionSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(sizes(data, "cost") == sizes(data, "COST"))
     val default = new BisectingKMeans(k = 3, seed = 5L).fit(data)
     val explicit = new BisectingKMeans(k = 3, seed = 5L, select = "cost").fit(data)
-    assert(default.clusterCentroids.map(_.toArray.toSeq).toSeq ==
-           explicit.clusterCentroids.map(_.toArray.toSeq).toSeq)
+    // Epsilon, not exact `==`: Lloyd's fold no longer merges partitions in a fixed order (11.09.2026,
+    // see CLAUDE.md), so two independent fits of the same config can differ in the last bits.
+    val defaultCoords = default.clusterCentroids.map(_.toArray.toSeq).toSeq
+    val explicitCoords = explicit.clusterCentroids.map(_.toArray.toSeq).toSeq
+    assert(defaultCoords.size == explicitCoords.size)
+    defaultCoords.zip(explicitCoords).foreach { case (a, b) =>
+      assert(a.size == b.size)
+      a.zip(b).foreach { case (x, y) => assert(math.abs(x - y) < 1e-9, s"$defaultCoords vs $explicitCoords") }
+    }
   }
 
   /** `size` reads mass, not rows, so it must obey the repo-wide invariant: clustering a row of
