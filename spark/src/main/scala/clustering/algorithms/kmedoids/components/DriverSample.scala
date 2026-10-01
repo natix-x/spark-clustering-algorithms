@@ -16,8 +16,7 @@ import scala.util.Random
 private[kmedoids] object DriverSample {
 
   /** How far to over-draw when a subset of an exact size has to be cut from a Bernoulli draw,
-   *  whose count is Binomial(n, p). At 1.3 the shortfall probability is negligible for any sample
-   *  size worth running, and the surplus is discarded by [[takeRandom]]. */
+   *  whose count is Binomial(n, p). The surplus is discarded by [[takeRandom]]. */
   val OversampleFactor = 1.3
 
   /** `size` elements chosen uniformly from `rows` (all of them when there are fewer).

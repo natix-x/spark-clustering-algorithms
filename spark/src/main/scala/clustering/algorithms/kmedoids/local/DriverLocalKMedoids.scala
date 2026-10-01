@@ -14,7 +14,7 @@ import org.apache.spark.sql.DataFrame
  *  makes the exact solver a knob of the sampling methods (Schubert & Rousseeuw 2021 improve
  *  CLARA/CLARANS by replacing precisely it).
  */
-private[kmedoids] trait DriverLocalKMedoids extends Clusterer {
+private[algorithms] trait DriverLocalKMedoids extends Clusterer {
 
   /** `weights(j)` = how many points `points(j)` stands for; the solver optimises
    *  Σ_j w_j · d(j, nearest medoid). */
@@ -31,7 +31,7 @@ private[kmedoids] trait DriverLocalKMedoids extends Clusterer {
   }
 }
 
-private[kmedoids] object DriverLocalKMedoids {
+private[algorithms] object DriverLocalKMedoids {
 
   /** Resolves an `inner` param value to a driver-local solver.
    *
@@ -39,11 +39,12 @@ private[kmedoids] object DriverLocalKMedoids {
    *  medoids (Schubert & Rousseeuw 2021 present it as a pure O(k) runtime optimisation, not an
    *  approximation), so the exhaustive rung carried no information the fast one does not, at k²
    *  the cost. `fastpam` IS the exact baseline. */
-  def fromName(name: String, k: Int, maxIter: Int, distance: DistanceMetric, seed: Long): DriverLocalKMedoids =
+  def fromName(name: String, k: Int, maxIter: Int, distance: DistanceMetric, seed: Long): DriverLocalKMedoids = {
     name.toLowerCase match {
       case "fastpam" => new FastPAM(k, maxIter, distance)
       case "fasterpam" => new FasterPAM(k, maxIter, distance, seed)
       case other       => throw new IllegalArgumentException(
         s"Unknown inner k-medoids solver: '$other'. Known: fastpam, fasterpam")
     }
+  }
 }
