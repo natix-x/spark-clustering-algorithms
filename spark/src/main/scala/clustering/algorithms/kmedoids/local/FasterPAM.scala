@@ -21,10 +21,10 @@ import scala.util.Random
  *  @param maxIter maximum full passes over the candidate set; a pass with no swap ends the search
  */
 class FasterPAM(
-  val k:        Int,
-  val maxIter:  Int            = 100,
+  val k: Int,
+  val maxIter: Int = 100,
   val distance: DistanceMetric = EuclideanDistance,
-  val seed:     Long           = 42L
+  val seed: Long = 42L
 ) extends DriverLocalKMedoids {
 
   override def fitLocal(points: Array[Vector], weights: Array[Double]): KMedoidsModel = {
@@ -33,17 +33,17 @@ class FasterPAM(
     require(weights.length == pointCount, s"weights (${weights.length}) must match points ($pointCount)")
 
     val distances = DistanceMatrix.pairwise(points, distance)
-    val medoids   = MedoidBuildPhase.selectInitialMedoids(distances, k, weights)
-    val cache     = new NearestMedoidCache(pointCount)
+    val medoids = MedoidBuildPhase.selectInitialMedoids(distances, k, weights)
+    val cache = new NearestMedoidCache(pointCount)
     cache.refresh(distances, medoids)
 
     val isMedoid = new Array[Boolean](pointCount)
     medoids.foreach(m => isMedoid(m) = true)
 
-    val visitOrder    = new Random(seed).shuffle((0 until pointCount).toVector).toArray
-    val deltasBySlot  = new Array[Double](k)
+    val visitOrder = new Random(seed).shuffle((0 until pointCount).toVector).toArray
+    val deltasBySlot = new Array[Double](k)
 
-    var pass     = 0
+    var pass = 0
     var improved = true
     while (improved && pass < maxIter) {
       improved = false
@@ -54,8 +54,8 @@ class FasterPAM(
           val move = SwapDeltas.bestMoveForCandidate(distances, candidate, weights, cache, deltasBySlot)
           if (SwapMove.isImprovement(move)) {
             isMedoid(medoids(move.slot)) = false
-            medoids(move.slot)           = candidate
-            isMedoid(candidate)          = true
+            medoids(move.slot) = candidate
+            isMedoid(candidate) = true
             // Incremental update, not a full O(n·k) refresh: only slot move.slot moved, so almost
             // every point's top-2 is untouched. See NearestMedoidCache.updateAfterSwap.
             cache.updateAfterSwap(distances, medoids, move.slot)
@@ -67,6 +67,6 @@ class FasterPAM(
       pass += 1
     }
 
-    new KMedoidsModel(medoids.map(points), distance)
+    new KMedoidsModel(medoids.map(points), distance, Some(pass))
   }
 }

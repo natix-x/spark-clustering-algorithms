@@ -52,15 +52,15 @@ class FastPAM(
       iteration += 1
     }
 
-    new KMedoidsModel(medoids.map(points), distance)
+    new KMedoidsModel(medoids.map(points), distance, Some(iteration))
   }
 
   /** Best (slot, candidate) swap over all non-medoid candidates. */
   private def bestSwap(
     distances: DistanceMatrix,
-    weights:   Array[Double],
-    cache:     NearestMedoidCache,
-    isMedoid:  Array[Boolean]
+    weights: Array[Double],
+    cache: NearestMedoidCache,
+    isMedoid: Array[Boolean]
   ): SwapMove = {
     // One O(n) Δ pass per candidate, ascending, so `preferred` sees candidates in index order and
     // the tie rule resolves to the lowest index.

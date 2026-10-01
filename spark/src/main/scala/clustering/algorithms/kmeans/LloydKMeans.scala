@@ -28,7 +28,7 @@ private[kmeans] object LloydKMeans {
    *  `release()` is a no-op unless this fit created the cache — the caller's cache is never
    *  unpersisted from in here (see [[clustering.core.Clusterer.fit]]). */
   final case class LloydContext(
-    preparedPoints:   DataFrame,
+    preparedPoints: DataFrame,
     fitDistance: DistanceMetric,
     initialCentroids: Array[Vector],
     ownsCache: Boolean
@@ -66,7 +66,7 @@ private[kmeans] object LloydKMeans {
      geometry: Geometry,
      maxIter: Int,
      eps: Double
-  ): Array[Vector] = {
+  ): Result = {
     require(initialCentroids.nonEmpty, "Lloyd.run: initial centroids must not be empty")
     val sc = points.sparkSession.sparkContext
     val kk = initialCentroids.length
@@ -131,8 +131,10 @@ private[kmeans] object LloydKMeans {
       iteration += 1
     }
 
-    centroids
+    Result(centroids, iteration)
   }
+
+  final case class Result(centroids: Array[Vector], iterationsRun: Int)
 
   /** Seeded weighted sample of `count` distinct-ish starting centroids, taken from prepared data.
    *  Kept here so [[KMeans]] and [[BreathingKMeans]] initialise identically.

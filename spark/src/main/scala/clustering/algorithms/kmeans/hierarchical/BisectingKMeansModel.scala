@@ -34,9 +34,14 @@ final case class InternalNode(centroid: Vector, left: ClusterNode, right: Cluste
  *  exactly like [[clustering.core.NearestPrototypeModel]] does for prototypes.
  */
 class BisectingKMeansModel(
-  val root:     ClusterNode,
-  val distance: DistanceMetric
+  val root: ClusterNode,
+  val distance: DistanceMetric,
+  iterationsRunArg: Option[Int] = None
 ) extends Model {
+
+  /** Sum of every split's 2-means Lloyd `iterationsRun`, across the whole tree — see
+   *  [[BisectingKMeans.bestBisection]] for what is counted. */
+  override val iterationsRun: Option[Int] = iterationsRunArg
 
   @transient private var bcRoot: Broadcast[ClusterNode] = _
 

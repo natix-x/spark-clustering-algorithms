@@ -50,6 +50,6 @@ class PAMAE(
       f"gain=${(seeding.cost - refined.cost) / math.max(seeding.cost, 1e-12) * 100}%.2f%% " +
       s"iterations=${refined.iterations} poolSize=${candidatePool.length} inner=$inner")
 
-    new KMedoidsModel(refined.medoids, distance)
+    new KMedoidsModel(refined.medoids, distance, Some(refined.iterations))
   }
 }

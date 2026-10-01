@@ -34,7 +34,8 @@ final class SparkClusteringJob {
     awaitExecutors(sc)
 
     // Settle interval ensures all executors publish their initial metrics before we baseline.
-    val metricSettleTimeMs = ProcessCpuPlugin.settleMs(ProcessCpuPlugin.samplingIntervalMs(sc.getConf))
+    val metricSettleTimeMs = ProcessCpuPlugin.settleMs(
+      ProcessCpuPlugin.samplingIntervalMs(sc.getConf), ProcessCpuPlugin.sendIntervalMs(sc.getConf))
     ProcessCpuPlugin.reset()
     waitForMetricPublishers(metricSettleTimeMs, "baseline")
     ProcessCpuPlugin.captureBaseline()
@@ -157,7 +158,9 @@ final class SparkClusteringJob {
         datasetMetadata = dataSource.metadata,
         nRows = rowCount,
         nPartitions = partitionCount,
-        nFeatures = featureCount
+        nFeatures = featureCount,
+        iterationsRun = model.iterationsRun,
+        reductionSize = model.reductionSize
       ),
       evaluationResult = evaluationResult,
       timings = RunResult.Timings(

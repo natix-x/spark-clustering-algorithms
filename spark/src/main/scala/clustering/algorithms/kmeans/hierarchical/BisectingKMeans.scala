@@ -90,6 +90,11 @@ class BisectingKMeans(
 
     val leaves = ArrayBuffer(LeafState(rootNode, preparedPoints, rootRows, rootMass, rootCost, unsplittable = false))
     var splits = 0
+    // Sum of every 2-means Lloyd loop's iterationsRun across every split — including losing
+    // trials under `trials > 1`, since they are real Lloyd runs that were actually paid for
+    // (same accounting BreathingKMeans uses: the reported count is the work done, not the work
+    // of the winning/kept branch only).
+    var totalIterations = 0
 
     while (leaves.size < k) {
       // Best splittable leaf under `select`; `maxBy` keeps the first maximum, so ties resolve
@@ -99,12 +104,13 @@ class BisectingKMeans(
       if (candidates.isEmpty) {
         logger.warn(s"bisecting k-means: no splittable leaf left after ${leaves.size} clusters " +
           s"(requested k=$k) — stopping early")
-        return buildModel(preparedPoints, ownsRootCache, leaves, rootNode)
+        return buildModel(preparedPoints, ownsRootCache, leaves, rootNode, totalIterations)
       }
       val target = candidates.maxBy(i => leafScore(leaves(i)))
       val leaf = leaves(target)
 
-      val subModel = bestBisection(leaf.points, splits, fitDistance)
+      val (subModel, bisectionIterations) = bestBisection(leaf.points, splits, fitDistance)
+      totalIterations += bisectionIterations
 
       // `assignedPoints` MUST be materialised before branching. Both childPartitions read it through their
       // own filter and each child's stats() is a separate action, so an uncached `assignedPoints`
@@ -153,7 +159,7 @@ class BisectingKMeans(
       }
     }
 
-    buildModel(preparedPoints, ownsRootCache, leaves, rootNode)
+    buildModel(preparedPoints, ownsRootCache, leaves, rootNode, totalIterations)
   }
 
   // A leaf can be split while it holds at least two rows and its points are not all identical.
@@ -170,25 +176,33 @@ class BisectingKMeans(
    *  Losing trials are scored but never materialised: [[splitCost]] needs only the two
    *  centroids, so a trial costs one 2-means fit plus one aggregation, not a pair of cached
    *  child subsets. */
-  private def bestBisection(points: DataFrame, splitIndex: Int, metric: DistanceMetric): KMeansModel = {
+  /** Returns the winning 2-means model plus the SUM of `iterationsRun` over every trial tried
+   *  (including the losing ones under `trials > 1`) — they are real Lloyd loops that were
+   *  actually run and paid for, so they count toward the fit's total, same as a failed
+   *  breathing cycle still counts in [[BreathingKMeans]]. */
+  private def bestBisection(points: DataFrame, splitIndex: Int, metric: DistanceMetric): (KMeansModel, Int) = {
     def bisect(trial: Int): KMeansModel =
       new KMeans(k = 2, maxIter = maxIter, eps = eps,
         seed = seed + splitIndex.toLong * trials + trial, geometry = geometry).fit(points)
 
-    if (trials == 1) bisect(0)
-    else {
+    if (trials == 1) {
+      val only = bisect(0)
+      (only, only.iterationsRun.getOrElse(0))
+    } else {
       var best = bisect(0)
+      var totalIterations = best.iterationsRun.getOrElse(0)
       var bestCost = splitCost(points, best.centroids, metric)
       var trial = 1
       while (trial < trials) {
         val candidate = bisect(trial)
+        totalIterations += candidate.iterationsRun.getOrElse(0)
         val candidateCost = splitCost(points, candidate.centroids, metric)
         // Strict `<` keeps the earliest of several equally good trials, so ties do not
         // depend on which one happened to be evaluated last.
         if (candidateCost < bestCost) { best = candidate; bestCost = candidateCost }
         trial += 1
       }
-      best
+      (best, totalIterations)
     }
   }
 
@@ -223,11 +237,12 @@ class BisectingKMeans(
                       prepared: DataFrame,
                       ownsPreparedCache: Boolean,
                       leaves: ArrayBuffer[LeafState],
-                      root: BisectingKMeans.BuildingNode
+                      root: BisectingKMeans.BuildingNode,
+                      totalIterations: Int
   ): BisectingKMeansModel = {
     leaves.foreach(l => if (l.points ne prepared) l.points.unpersist(blocking = false))
     if (ownsPreparedCache) prepared.unpersist(blocking = false)
-    new BisectingKMeansModel(BisectingKMeans.freeze(root, Array(0)), geometry.modelDistance)
+    new BisectingKMeansModel(BisectingKMeans.freeze(root, Array(0)), geometry.modelDistance, Some(totalIterations))
   }
 
   private def calculateCentroid(df: DataFrame): Vector =
@@ -276,12 +291,12 @@ private object BisectingKMeans {
    *  Weights may be fractional (lightweight coresets use w = 1/(m·q(x))), so `mass` is a
    *  Double and must never be used as a row count. */
   final case class LeafState(
-                              node: BuildingNode,
-                              points: DataFrame,
-                              pointCount: Long,
-                              totalWeight: Double,
-                              cost: Double,
-                              unsplittable: Boolean
+                        node: BuildingNode,
+                        points: DataFrame,
+                        pointCount: Long,
+                        totalWeight: Double,
+                        cost: Double,
+                        unsplittable: Boolean
   )
 
   /** Tree node under construction; leaves have both children null. Mutable because a

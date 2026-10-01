@@ -88,6 +88,14 @@ final case class RunResult(
   driverMemoryGbHours: Double,
   driverPeakDirectMemoryBytes: Long,
 
+  /** Iterations the fit's convergence loop actually ran. A maxIter param is a CAP, not a count,
+   *  so without this a duration cannot be read as speed. None when the algorithm has no loop. */
+  iterationsRun: Option[Int],
+
+  /** Realised size of the fit's data reduction (coreset drawn, candidate cores selected); None
+   *  when the algorithm optimised against the full data. See [[clustering.core.Model.reductionSize]]. */
+  reductionSize: Option[Int],
+
   // Evaluation metrics
   nClusters: Option[Int],
   noiseFraction: Option[Double],
@@ -101,7 +109,7 @@ final case class RunResult(
   silhouetteScoredPoints: Option[Int],
   silhouetteSampleClusters: Option[Int],
   silhouetteUnscoredPoints: Option[Int],
-  clusterSizes: Option[Map[String, String]],
+  clusterSizes: Option[Map[String, Long]],
 
   /**
    * Centroid-based indices computed on the FULL dataset.
@@ -184,7 +192,11 @@ object RunResult {
     datasetMetadata: Map[String, String],
     nRows: Long,
     nPartitions: Int,
-    nFeatures: Option[Int]
+    nFeatures: Option[Int],
+    /** Iterations the fit's convergence loop actually ran; None when it has none. */
+    iterationsRun: Option[Int] = None,
+    /** Realised size of the fit's data reduction; None when there was none. */
+    reductionSize: Option[Int] = None
   )
 
   object Workload {
@@ -222,6 +234,8 @@ object RunResult {
     nRows = workload.nRows,
     nPartitions = workload.nPartitions,
     nFeatures = workload.nFeatures,
+    iterationsRun = workload.iterationsRun,
+    reductionSize = workload.reductionSize,
     loadDurationMs = timings.loadMs,
     fitDurationMs = timings.fitMs,
     evalDurationMs = timings.evalMs,
@@ -260,7 +274,7 @@ object RunResult {
     silhouetteScoredPoints = eval.silhouetteScoredPoints,
     silhouetteSampleClusters = eval.silhouetteSampleClusters,
     silhouetteUnscoredPoints = eval.silhouetteUnscoredPoints,
-    clusterSizes = eval.clusterSizes.map(_.map { case (k, v) => k.toString -> v.toString }),
+    clusterSizes = eval.clusterSizes.map(_.map { case (k, v) => k.toString -> v }),
     daviesBouldin = eval.daviesBouldin,
     calinskiHarabasz = eval.calinskiHarabasz
   )

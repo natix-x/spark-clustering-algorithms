@@ -1,8 +1,8 @@
 package clustering.algorithms.kmeans
 
 import clustering.core.{Clusterer, EuclideanGeometry, Geometry, Weights}
-import clustering.utils.PartitionAggregator
 import clustering.distance.DistanceMetric
+import clustering.utils.PartitionAggregator
 import org.apache.spark.ml.linalg.{Vector, Vectors}
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.functions._
@@ -35,9 +35,6 @@ class BreathingKMeans(
   val maxCycles: Int = 100
 ) extends Clusterer {
 
-  require(k >= 1, s"k must be >= 1, got $k")
-  require(m0 >= 1, s"m0 must be >= 1, got $m0")
-
   /** Insertion offset scale, ε in the paper. */
   private val epsilon = 0.01
 
@@ -46,7 +43,12 @@ class BreathingKMeans(
   override def fit(data: DataFrame): KMeansModel = {
     val setup = LloydKMeans.initialize(data, geometry, k, seed, StorageLevel.MEMORY_AND_DISK)
 
-    var bestCentroids = LloydKMeans.run(setup.preparedPoints, setup.initialCentroids, setup.fitDistance, geometry, maxIter, eps)
+    // Breathing runs the Lloyd loop once per cycle, so the reported count is their SUM: the work
+    // done, not the work of the last cycle.
+    var totalIterations = 0
+    val seeded = LloydKMeans.run(setup.preparedPoints, setup.initialCentroids, setup.fitDistance, geometry, maxIter, eps)
+    totalIterations += seeded.iterationsRun
+    var bestCentroids = seeded.centroids
     // Recomputed only when bestCentroids changes (a successful cycle) — a failed cycle would
     // otherwise re-run this full-data job on unchanged input, and failures grow more common as
     // currentM shrinks toward 0.
@@ -72,7 +74,9 @@ class BreathingKMeans(
       val highestErrorCentroidsIndices = centroidStatistics.zipWithIndex.sortBy { case (s, i) => (-s.error, i) }.take(currentM).map(_._2)
       val newCentroids = highestErrorCentroidsIndices.map(i => generateOffset(bestCentroids(i), offsetScale, random))
 
-      val expandedCentroids = LloydKMeans.run(setup.preparedPoints, bestCentroids ++ newCentroids, setup.fitDistance, geometry, maxIter, eps)
+      val expanded = LloydKMeans.run(setup.preparedPoints, bestCentroids ++ newCentroids, setup.fitDistance, geometry, maxIter, eps)
+      totalIterations += expanded.iterationsRun
+      val expandedCentroids = expanded.centroids
 
       // ── breathe out ───────────────────────────────────────────────────────────────
       // Remove exactly as many as were newly inserted: the invariant is "shrink back to k", not
@@ -84,7 +88,9 @@ class BreathingKMeans(
           val expandedStatistics = calculateCentroidStats(setup.preparedPoints, expandedCentroids, setup.fitDistance)
           val keptIndices = expandedCentroids.indices.toSet --
             selectCentroidsForRemoval(expandedCentroids, expandedStatistics, removalCount, setup.fitDistance)
-          LloydKMeans.run(setup.preparedPoints, keptIndices.toArray.sorted.map(expandedCentroids), setup.fitDistance, geometry, maxIter, eps)
+          val shrunk = LloydKMeans.run(setup.preparedPoints, keptIndices.toArray.sorted.map(expandedCentroids), setup.fitDistance, geometry, maxIter, eps)
+          totalIterations += shrunk.iterationsRun
+          shrunk.centroids
         }
 
       val reducedStats = calculateCentroidStats(setup.preparedPoints, reducedCentroids, setup.fitDistance)
@@ -105,7 +111,8 @@ class BreathingKMeans(
       logger.warn(s"breathing: stopped at the maxCycles=$maxCycles bound with m=$currentM")
 
     setup.release()
-    new KMeansModel(bestCentroids, geometry.modelDistance)
+
+    new KMeansModel(bestCentroids, geometry.modelDistance, Some(totalIterations))
   }
 
   /** `c + ε · scale · u`, u uniform in the unit hypercube centred at the origin, `scale` the
@@ -231,7 +238,7 @@ class BreathingKMeans(
           else geom.pointCostFromOrdinal(secondNearestDistance)
 
         val base = nearestIndex * 3
-        arr(base)     += w                              // mass
+        arr(base) += w                              // mass
         arr(base + 1) += w * errorCost                  // error   = Σ w·φ(d1)
         arr(base + 2) += w * (secondCost - errorCost)   // utility = Σ w·(φ(d2) − φ(d1))
     }

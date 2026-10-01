@@ -28,6 +28,10 @@ class CoreLabelModel(
   require(corePoints.length == coreClusterLabels.length,
     s"cores (${corePoints.length}) and labels (${coreClusterLabels.length}) must have the same length")
 
+  /** The candidate core points the density estimate was computed at — `coreSampleFraction`'s
+   *  REALISED size, which the Bernoulli selection makes a random variable around `fraction * n`. */
+  override val reductionSize: Option[Int] = Some(corePoints.length)
+
   def getNumberOfClusters: Int = if (coreClusterLabels.isEmpty) {
     0
   } else {

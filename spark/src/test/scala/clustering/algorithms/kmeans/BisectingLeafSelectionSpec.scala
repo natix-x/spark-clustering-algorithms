@@ -53,6 +53,14 @@ class BisectingLeafSelectionSpec extends AnyFunSuite with BeforeAndAfterAll {
       .toSeq
   }
 
+  test("iterationsRun sums the Lloyd loops across every split, not just the last one") {
+    val data = lopsided
+    val model = new BisectingKMeans(k = 3, seed = 5L).fit(data)
+    // k=3 needs 2 splits, and every split's 2-means must run at least one Lloyd iteration,
+    // so the total across the whole tree is strictly more than any single split could report.
+    assert(model.iterationsRun.exists(_ >= 2), s"expected iterationsRun >= 2 (one per split), got ${model.iterationsRun}")
+  }
+
   test("cost and size pick different leaves, so they build different trees") {
     val data = lopsided
     val byCost = sizes(data, "cost")
