@@ -33,6 +33,12 @@ object Weights {
   def toRdd(data: DataFrame): RDD[(Vector, Double)] =
     withWeights(data).rdd.map(r => (r.getAs[Vector](0), r.getDouble(1)))
 
+  /** Scalar counterpart of [[safeColumn]], for driver-local and raw-array code paths.
+   *  NULL cannot occur here, so the cases left are NaN, negative and infinite. Mirrors the Flink
+   *  engine's `Weights.sanitize`. */
+  def sanitize(weight: Double): Double =
+    if (!weight.isNaN && weight > 0.0 && weight < Double.PositiveInfinity) weight else 0.0
+
   /** Creates an array of 1.0s of size `n`. */
   def unit(n: Int): Array[Double] = Array.fill(n)(1.0)
 

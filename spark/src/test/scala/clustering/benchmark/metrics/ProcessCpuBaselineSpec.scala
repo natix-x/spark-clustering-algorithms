@@ -269,8 +269,16 @@ class ProcessCpuBaselineSpec extends AnyFunSuite with BeforeAndAfterEach {
 
   test("the boundary settle is derived from the sampling period, so 200ms costs less waiting") {
     assert(ProcessCpuPlugin.DefaultSamplingIntervalMs == 200L)
-    assert(ProcessCpuPlugin.settleMs(200L) == 600L)
-    assert(ProcessCpuPlugin.settleMs(1000L) == 3000L)   // scales up with a coarser period
-    assert(ProcessCpuPlugin.settleMs(50L) == 600L)      // floored, RPC latency still has to fit
+    assert(ProcessCpuPlugin.settleMs(200L, 200L) == 600L)
+    assert(ProcessCpuPlugin.settleMs(1000L, 1000L) == 3000L)   // scales up with a coarser period
+    assert(ProcessCpuPlugin.settleMs(50L, 50L) == 600L)        // floored, RPC latency still has to fit
+  }
+
+  test("the boundary settle covers whichever of sampling/send cadence is slower") {
+    // An executor's first RPC lands after sendIntervalMs (scheduleAtFixedRate's initial delay),
+    // not after samplingIntervalMs, so settleMs must not be sized off sampling alone.
+    assert(ProcessCpuPlugin.settleMs(200L, 2000L) == 6000L)
+    assert(ProcessCpuPlugin.settleMs(2000L, 200L) == 6000L)
+    assert(ProcessCpuPlugin.DefaultSendIntervalMs == ProcessCpuPlugin.DefaultSamplingIntervalMs)
   }
 }

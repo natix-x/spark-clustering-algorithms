@@ -1,6 +1,6 @@
 package clustering.evaluation
 
-import clustering.core.{Columns, Model, Weights}
+import clustering.core.{Columns, Model, NearestPrototypeModel, Weights}
 import clustering.distance.DistanceMetric
 import org.apache.spark.ml.linalg.{Vector, Vectors}
 import org.apache.spark.ml.stat.Summarizer
@@ -31,7 +31,10 @@ final case class ClusterMoments(clusterMoments: Array[ClusterMoment], globalCent
  *  itself (weighting == duplication, [[clustering.core.Weights]]); on unweighted input they're
  *  the plain textbook sums.
  *
- *  @param centroid                   weighted mean of the cluster's points
+ *  @param centroid                   the cluster's centre: the model's own prototype
+ *                                    ([[clustering.core.NearestPrototypeModel]] — a spherical
+ *                                    mean, a medoid, ...) when the model has one, else the plain
+ *                                    weighted arithmetic mean of its points
  *  @param clusterWeight              Σ w — the cluster's mass (its size, unweighted)
  *  @param sumOfWeightedDistances     Σ w·d(x, centroid)
  *  @param sumOfWeightedSquaredDistances Σ w·d(x, centroid)²
@@ -70,20 +73,37 @@ object ClusterMoments {
         Weights.column(data).as(Columns.Weight))
       .filter(col(Columns.Prediction) =!= NoiseLabel)
 
-    // Pass 1 — centroid and mass per cluster. Summarizer.mean is weight-aware natively.
-    //
-    // Always the arithmetic weighted mean (scikit-learn's convention), regardless of
-    // `distanceMetric` — NOT always the centre the algorithm optimised (spherical geometry,
-    // k-medoids, manhattan all optimise a different centre), which inflates the dispersion terms.
-    // Deliberate for now — see algorithm_selection.md.
-    val computedCentroids: Array[(Int, Vector, Double)] = labeledData
-      .groupBy(col(Columns.Prediction))
-      .agg(
-        Summarizer.mean(col(Columns.Features), col(Columns.Weight)).as("centroid"),
-        sum(col(Columns.Weight)).as("mass"))
-      .collect()
-      .map(row => (row.getInt(0), row.getAs[Vector]("centroid"), row.getDouble(2)))
-      .sortBy(_._1)
+    // Pass 1 — mass per cluster, always; centroid too, but only when the model has no centre
+    // of its own to report. A [[NearestPrototypeModel]] (k-means under any geometry, bisecting
+    // k-means, the whole k-medoids ladder) already carries the exact point it optimised against
+    // — a spherical mean, a medoid, a Manhattan-metric mean — and recomputing the plain arithmetic
+    // mean here would score dispersion against a DIFFERENT point than the one the algorithm
+    // actually fit, inflating DB and deflating CH for every non-Euclidean geometry/metric. For a
+    // model with no such centre (density labellings), the arithmetic mean is the only "centre"
+    // there is to fall back on. Summarizer.mean is weight-aware natively.
+    val ownCentroid: Option[Int => Vector] = model match {
+      case npm: NearestPrototypeModel => Some(label => npm.prototypes(label))
+      case _                          => None
+    }
+
+    val computedCentroids: Array[(Int, Vector, Double)] = ownCentroid match {
+      case Some(centroidOf) =>
+        labeledData
+          .groupBy(col(Columns.Prediction))
+          .agg(sum(col(Columns.Weight)).as("mass"))
+          .collect()
+          .map(row => (row.getInt(0), centroidOf(row.getInt(0)), row.getDouble(1)))
+          .sortBy(_._1)
+      case None =>
+        labeledData
+          .groupBy(col(Columns.Prediction))
+          .agg(
+            Summarizer.mean(col(Columns.Features), col(Columns.Weight)).as("centroid"),
+            sum(col(Columns.Weight)).as("mass"))
+          .collect()
+          .map(row => (row.getInt(0), row.getAs[Vector]("centroid"), row.getDouble(2)))
+          .sortBy(_._1)
+    }
 
     if (computedCentroids.isEmpty) return ClusterMoments(Array.empty, Vectors.zeros(0))
 

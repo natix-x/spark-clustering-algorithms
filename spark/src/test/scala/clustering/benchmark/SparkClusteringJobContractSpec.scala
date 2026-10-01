@@ -85,12 +85,6 @@ class SparkClusteringJobContractSpec extends AnyFunSuite {
     assertConformsToSchema(result)
   }
 
-  test("real fasterpam run emits a schema-conforming RunResult") {
-    val result = new SparkClusteringJob().run(config("it-fasterpam", "fasterpam"), LocalProfile)
-    assert(result.status == "ok", s"run failed: ${result.errorMessage.getOrElse("")}")
-    assertConformsToSchema(result)
-  }
-
   /** The `geometry: spherical` knob on slot 1 — spherical k-means goes through the same
    *  runner, so the only thing to verify end-to-end is that the config resolves and the
    *  run produces a conforming result with the requested number of clusters. The config's

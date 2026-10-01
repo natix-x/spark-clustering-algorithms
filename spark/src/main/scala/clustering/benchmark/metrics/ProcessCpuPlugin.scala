@@ -44,10 +44,13 @@ object ProcessCpuPlugin {
   val DefaultSamplingIntervalMs = 200L // 200 milliseconds
 
   // How often an executor flushes its locally-aggregated JvmSample to the driver via RPC.
-  // Decoupled from SamplingIntervalConf: sampling stays tick-granular (gap-free per-tick peaks),
-  // only the network send is throttled, so peak precision is unaffected by send frequency.
+  // Matches SamplingIntervalConf by default: a phase can close (SparkClusteringJob.PhaseTimeline)
+  // in well under a second on small/test configs, and any gap between send and sample cadence
+  // is a window in which a short phase's boundary snapshot reads stale (often zero) executor
+  // data, misattributing that phase's work to whichever phase is open at the next flush. Widen
+  // this only with settleMs derived from it (below), never on its own.
   val SendIntervalConf = "spark.clustering.metrics.sendIntervalMs"
-  val DefaultSendIntervalMs = 2000L // 2 seconds
+  val DefaultSendIntervalMs = DefaultSamplingIntervalMs
 
   def samplingIntervalMs(conf: SparkConf): Long =
     conf.getOption(SamplingIntervalConf).map(_.toLong).filter(_ > 0).getOrElse(DefaultSamplingIntervalMs)
@@ -55,8 +58,12 @@ object ProcessCpuPlugin {
   def sendIntervalMs(conf: SparkConf): Long =
     conf.getOption(SendIntervalConf).map(_.toLong).filter(_ > 0).getOrElse(DefaultSendIntervalMs)
 
-  def settleMs(samplingIntervalMs: Long): Long =
-    math.max(600L, 3L * samplingIntervalMs)
+  // Executors don't publish until their first RPC lands, which is delayed by sendIntervalMs
+  // (scheduleAtFixedRate's initial delay), not by samplingIntervalMs — so the settle wait must
+  // cover whichever cadence is slower, or a fresh executor's baseline/phase-boundary snapshot
+  // can be captured before any of its data has arrived.
+  def settleMs(samplingIntervalMs: Long, sendIntervalMs: Long): Long =
+    math.max(600L, 3L * math.max(samplingIntervalMs, sendIntervalMs))
 
   final case class CounterSnapshot(
                                     executorCpuNanos: Map[String, Long],
@@ -129,8 +136,8 @@ object ProcessCpuPlugin {
     // timestamp on WorkerSample, deliberately not built (see clock-skew note elsewhere).
     synchronized {
       if (isPhaseOpen) {
-        phaseWindowHeapMap.merge(execId, sample.tickPeakHeapBytes, Math.max)
-        phaseWindowDirectMap.merge(execId, sample.directBytes, Math.max)
+        phaseWindowHeapMap.merge(execId, sample.tickPeakHeapBytes, (a: java.lang.Long, b: java.lang.Long) => Math.max(a, b))
+        phaseWindowDirectMap.merge(execId, sample.directBytes, (a: java.lang.Long, b: java.lang.Long) => Math.max(a, b))
       }
     }
   }

@@ -1,7 +1,9 @@
 package clustering.benchmark.registry
 
+import clustering.algorithms.coreset.Coreset
+import clustering.algorithms.coreset.inner.{InnerSolver, LocalLloyd, LocalMedoids}
 import clustering.algorithms.dbscan.DBSCANpp
-import clustering.algorithms.dbscan.components.CandidateSelectionStrategy
+import clustering.algorithms.dbscan.components.UniformSelection
 import clustering.algorithms.kmeans.hierarchical.BisectingKMeans
 import clustering.algorithms.kmeans.{BreathingKMeans, KMeans}
 import clustering.algorithms.kmedoids.hybrid.{CLARA, PAMAE}
@@ -159,6 +161,40 @@ object AlgorithmRegistry {
     }
   }
 
+  /** Coreset clustering (Bachem, Lucic &amp; Krause, KDD 2018) — one distributed reduction, then
+   *  any inner algorithm on the `m` weighted rows it produced.
+   *
+   *  `inner` decides which param set the run must supply, following the convention the rest of
+   *  this registry already uses: `kmeans` reads `geometry` (its centroid update is an arithmetic
+   *  mean, only consistent under that geometry's own metric), while `medoids` reads `distance`. The metric chosen there is the one the COREST CONSTRUCTION measures with too, so
+   *  a run never mixes two metrics.
+   *
+   *  `m` is required, with no default: it is the accuracy-vs-cost knob of the whole slot, and a
+   *  result that hides which m produced it cannot enter the sweep. */
+  private object CoresetFactory extends AlgorithmFactory {
+    val name: String = AlgorithmName.Coreset
+
+    def create(p: Params): Built = {
+      val k = p.int("k")
+      val m = p.int("m")
+      val maxIter = p.intOpt("maxIter", 100)
+      val seed = p.longOpt("seed", 42L)
+
+      val solver: InnerSolver = p.stringOpt("inner", "kmeans").toLowerCase match {
+        case "kmeans" =>
+          new LocalLloyd(k, maxIter, p.doubleOpt("eps", 1e-4), geometryFrom(p), seed)
+        case "medoids" =>
+          // Same `fastpam | fasterpam` knob CLARA's `inner` is, so the two reductions are compared
+          // with the identical exact solver inside them.
+          new LocalMedoids(p.stringOpt("innerSolver", "fastpam"), k, maxIter, distanceFrom(p), seed)
+        case other =>
+          throw new IllegalArgumentException(s"Unknown inner algorithm: '$other'. Known: kmeans, medoids")
+      }
+
+      Built(new Coreset(k, m, solver, seed), solver.modelDistance)
+    }
+  }
+
   private object DBSCANppFactory extends AlgorithmFactory {
     val name: String = AlgorithmName.DBSCANpp
 
@@ -169,7 +205,7 @@ object AlgorithmRegistry {
         minPts = p.int("minPts"),
         // The universal accuracy-vs-cost knob; required, so no run hides which m it used.
         coreSampleFraction = p.double("coreSampleFraction"),
-        samplingStrategy = CandidateSelectionStrategy.fromName(p.stringOpt("sampling", "uniform")),
+        samplingStrategy = UniformSelection.fromName(p.stringOpt("sampling", "uniform")),
         // assign: 'eps' = classic DBSCAN noise semantics, 'closest' = the paper's rule.
         requireWithinEps = assignWithinEps(p.stringOpt("assign", "eps")),
         distanceMetric = distance,
