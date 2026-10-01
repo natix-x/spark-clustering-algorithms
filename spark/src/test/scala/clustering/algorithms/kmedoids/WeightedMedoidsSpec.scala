@@ -1,6 +1,5 @@
 package clustering.algorithms.kmedoids
 
-import clustering.algorithms.kmedoids.distributed.DistributedFastPAM
 import clustering.algorithms.kmedoids.hybrid.PAMAE
 import clustering.algorithms.kmedoids.components.{MedoidCost, MedoidRefinement}
 import clustering.core.{Columns, Weights}
@@ -80,15 +79,10 @@ class WeightedMedoidsSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(math.abs(onWeighted - objective(medoids)) < 1e-9)
   }
 
-  test("distfastpam and pamae reach the same objective on both forms") {
-    def dist(df: DataFrame)  = new DistributedFastPAM(3, 50, EuclideanDistance).fit(df).medoids
+  test("pamae reaches the same objective on both forms") {
     def pamae(df: DataFrame) = new PAMAE(3, 2, 6, 50, 3, 6, "fastpam", EuclideanDistance, 3L).fit(df).medoids
 
-    Seq("distfastpam" -> (dist(weighted), dist(duplicated)),
-        "pamae"       -> (pamae(weighted), pamae(duplicated))).foreach { case (name, (w, d)) =>
-      assert(math.abs(objective(w) - objective(d)) < 1e-9,
-        s"$name: ${objective(w)} != ${objective(d)}")
-    }
+    assert(math.abs(objective(pamae(weighted)) - objective(pamae(duplicated))) < 1e-9)
   }
 
   /** Every row of `duplicated` is repeated, so a solver that treats each copy as a separate

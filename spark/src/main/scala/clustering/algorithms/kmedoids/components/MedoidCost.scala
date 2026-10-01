@@ -34,7 +34,7 @@ private[kmedoids] object MedoidCost {
     // ONE fold: S set costs at once, coordinates unpacked once and shared
     //
     // Unordered: feeds only CLARA's argmin over candidate sets — a discrete pick, same category
-    // as distfastpam/dbscanpp, so bit-order doesn't matter.
+    // as dbscanpp, so bit-order doesn't matter.
     val costs = PartitionAggregator.aggregateDoubles(
       Weights.toRdd(data), medoidSets.length) { (acc, row) =>
         val point = row._1.toArray

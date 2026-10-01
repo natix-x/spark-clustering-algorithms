@@ -45,7 +45,7 @@ object PartitionAggregator {
    *  Negligible for Lloyd (k·(d+1)) but not at every dataset — at d=1024 and thousands of source
    *  partitions, one array PER PARTITION would be hundreds of MB/iteration on the driver;
    *  `mergeGroups` bounds that regardless of partition count. Do NOT use this for the long
-   *  accumulators (`dbscanpp`'s n·m, DistributedFastPAM's n·k) — there the tree merge keeps the
+   *  accumulators (`dbscanpp`'s n·m) — there the tree merge keeps the
    *  driver alive.
    */
   private val MaxMergeGroups = 256

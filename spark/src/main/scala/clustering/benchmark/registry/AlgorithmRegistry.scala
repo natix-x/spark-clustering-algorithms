@@ -4,7 +4,6 @@ import clustering.algorithms.dbscan.DBSCANpp
 import clustering.algorithms.dbscan.components.CandidateSelectionStrategy
 import clustering.algorithms.kmeans.hierarchical.BisectingKMeans
 import clustering.algorithms.kmeans.{BreathingKMeans, KMeans}
-import clustering.algorithms.kmedoids.distributed.DistributedFastPAM
 import clustering.algorithms.kmedoids.hybrid.{CLARA, PAMAE}
 import clustering.benchmark.config.{AlgorithmSpec, Params}
 import clustering.core.{Clusterer, Geometry}
@@ -21,10 +20,10 @@ object AlgorithmRegistry {
   object AlgorithmName {
     val KMeans = "kmeans"
     val BisectingKMeans = "bisectingkmeans"
-    val DistFastPAM = "distfastpam"
     val CLARA = "clara"
     val PAMAE = "pamae"
     val DBSCANpp = "dbscanpp"
+    val Coreset = "coreset"
   }
 
   private trait AlgorithmFactory {
@@ -39,10 +38,10 @@ object AlgorithmRegistry {
     NamedRegistry("algorithm", Seq(
       KMeansFactory,
       BisectingKMeansFactory,
-      DistributedFastPAMFactory,
       CLARAFactory,
       PAMAEFactory,
-      DBSCANppFactory
+      DBSCANppFactory,
+      CoresetFactory
     ).map(f => f.name -> f))
 
   def create(spec: AlgorithmSpec): Built =
@@ -119,19 +118,6 @@ object AlgorithmRegistry {
         select = p.stringOpt("select", "cost")
       )
       Built(clusterer, geometry.modelDistance)
-    }
-  }
-
-  private object DistributedFastPAMFactory extends AlgorithmFactory {
-    val name: String = AlgorithmName.DistFastPAM
-
-    def create(p: Params): Built = {
-      val distance = distanceFrom(p)
-      Built(new DistributedFastPAM(
-        k = p.int("k"),
-        maxIter = p.intOpt("maxIter", 100),
-        distance = distance
-      ), distance)
     }
   }
 
